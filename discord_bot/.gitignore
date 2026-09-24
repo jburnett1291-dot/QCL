@@ -1,0 +1,17 @@
+.env
+*.last_good.py
+__pycache__/
+*.py[cod]
+*.log
+qcl_state.json
+fed_reserve_state.json
+qcl_registrations.json
+registrations.json
+schedule_backup.txt
+Backups/
+Downloaded_Photos/
+Graphics/
+KnowledgeVault/
+archives/
+cards/
+cutouts/
