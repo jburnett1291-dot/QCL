@@ -5,5 +5,4 @@ requests>=2.31
 Pillow>=10.0
 streamlit>=1.32
 opencv-python-headless>=4.8
-easyocr>=1.7
 streamlit-cookies-manager==0.2.0
