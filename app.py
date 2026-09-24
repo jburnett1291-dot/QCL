@@ -114,6 +114,7 @@ import hashlib
 import base64
 import time
 import urllib.parse
+from datetime import datetime, timedelta
 
 _AUTH = "https://discord.com/api/oauth2/authorize"
 _TOKEN = "https://discord.com/api/oauth2/token"
@@ -161,15 +162,43 @@ def _login_cookies():
     if len(_cfg("QCL_SIGNING_SECRET")) < 32:
         return None
     try:
-        from streamlit_cookies_manager import EncryptedCookieManager
-    except (ImportError, AttributeError):
-        # The legacy package imports st.cache, removed in newer Streamlit.
+        import extra_streamlit_components as stx
+    except ImportError:
         return None
-    manager = EncryptedCookieManager(
-        prefix="qcl-league-hub/",
-        password=_cfg("QCL_SIGNING_SECRET"),
-    )
-    return manager if manager.ready() else None
+    return stx.CookieManager(key="qcl_session_cookie_manager")
+
+
+def _cookie_get(name):
+    if _cookies is None:
+        return None
+    try:
+        return _cookies.get(name)
+    except Exception:
+        return None
+
+
+def _cookie_set(name, value):
+    if _cookies is None:
+        return False
+    try:
+        _cookies.set(
+            name,
+            value,
+            expires_at=datetime.now() + timedelta(seconds=_TOKEN_TTL),
+            key=f"set_{name}_{hashlib.sha256(value.encode()).hexdigest()[:12]}",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _cookie_delete(name):
+    if _cookies is None:
+        return
+    try:
+        _cookies.delete(name, key=f"delete_{name}_{int(time.time())}")
+    except Exception:
+        pass
 
 
 def _exchange_code(code):
@@ -225,10 +254,7 @@ def restore_session():
             # when cookie support is installed.
             token = _sign({"id": u["id"], "name": u["global_name"],
                            "avatar": u["avatar"], "exp": time.time() + _TOKEN_TTL})
-            if _cookies is not None:
-                _cookies["qcl"] = token
-                _cookies.save()
-            else:
+            if not _cookie_set("qcl", token):
                 st.query_params["qcl"] = token
             _rerun()
         else:
@@ -237,7 +263,7 @@ def restore_session():
         return
 
     # 2. Saved cookie (preferred) or existing signed URL link (legacy).
-    tok = _cookies.get("qcl") if _cookies is not None else None
+    tok = _cookie_get("qcl")
     tok = tok or params.get("qcl")
     if tok:
         payload = _verify(tok if isinstance(tok, str) else tok[0])
@@ -246,9 +272,7 @@ def restore_session():
                 "id": payload["id"], "username": payload["name"],
                 "global_name": payload["name"], "avatar": payload.get("avatar")}
             st.session_state["auth_expires_at"] = payload["exp"]
-            if _cookies is not None and params.get("qcl"):
-                _cookies["qcl"] = tok
-                _cookies.save()
+            if params.get("qcl") and _cookie_set("qcl", tok):
                 st.query_params.clear()
 
 
@@ -282,9 +306,8 @@ def login_widget(key="sidebar"):
         if c2.button("Log out", key=f"logout_{key}"):
             st.session_state.pop("discord_user", None)
             st.session_state.pop("auth_expires_at", None)
-            if _cookies is not None and _cookies.get("qcl"):
-                del _cookies["qcl"]
-                _cookies.save()
+            if _cookie_get("qcl"):
+                _cookie_delete("qcl")
             st.query_params.clear()
             _rerun()
     else:
@@ -522,6 +545,203 @@ def _closed_season_desk(reason):
     else:
         st.caption("League data is public. Link an approved Discord account for desk access.")
         login_widget(key="empty_season")
+
+
+def _registration_attachment(upload, prefix, files):
+    if upload is None:
+        return None
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", upload.name or "proof.png")
+    field = f"files[{len(files)}]"
+    files.append(
+        (field, (f"{prefix}-{safe_name}", upload.getvalue(),
+                 upload.type or "application/octet-stream"))
+    )
+    return field
+
+
+def _submit_streamlit_registration(payload, uploads):
+    """Send a registration to the bot's private Discord intake channel."""
+    webhook = str(_cfg("QCL_REGISTRATION_WEBHOOK_URL") or "").strip()
+    if not webhook.startswith("https://discord.com/api/webhooks/"):
+        raise RuntimeError(
+            "Registration intake is not configured. Add "
+            "QCL_REGISTRATION_WEBHOOK_URL to Streamlit secrets."
+        )
+    files = []
+    payload["attachments"] = {}
+    for label, prefix, upload in uploads:
+        field = _registration_attachment(upload, prefix, files)
+        if field:
+            payload["attachments"].setdefault(label, []).append(field)
+    if len(files) > 10:
+        raise ValueError("Discord accepts at most 10 uploaded files per registration.")
+    message = "QCL_STREAMLIT_REGISTRATION\n```json\n" + json.dumps(
+        payload, ensure_ascii=True, separators=(",", ":")
+    ) + "\n```"
+    if len(message) > 1950:
+        raise ValueError("The registration is too large. Shorten roster notes and try again.")
+    request_files = {
+        field: file_tuple for field, file_tuple in files
+    }
+    response = requests.post(
+        webhook,
+        data={"payload_json": json.dumps({"content": message})},
+        files=request_files or None,
+        timeout=30,
+    )
+    if response.status_code not in (200, 204):
+        raise RuntimeError(f"Discord intake returned HTTP {response.status_code}.")
+
+
+def _render_registration():
+    st.title("📝 League Registration")
+    st.caption(
+        "Register as a Draft Player or BYOT GM. Submissions go to the same "
+        "private Discord review queue used by the bot."
+    )
+    user = current_user()
+    if not user:
+        st.info("Link Discord first so the registration is tied to the correct account.")
+        login_widget(key="registration")
+        return
+    st.success(f"Discord linked as {user.get('global_name') or user.get('username')}")
+    role_label = st.radio(
+        "Registration type",
+        ["Draft Player", "BYOT GM"],
+        horizontal=True,
+        key="registration_type",
+    )
+    role = "draft_player" if role_label == "Draft Player" else "byot_gm"
+    with st.form("qcl_streamlit_registration", clear_on_submit=False):
+        if role == "byot_gm":
+            team_name = st.text_input("Team name *", max_chars=80)
+            team_logo = st.file_uploader(
+                "Team logo *", type=["png", "jpg", "jpeg", "webp"],
+                key="reg_team_logo",
+            )
+        else:
+            team_name, team_logo = "", None
+        gamertag = st.text_input("Your gamertag or PSN *", max_chars=80)
+        platform = st.selectbox("Platform *", ["PlayStation", "Xbox", "PC", "Other"])
+        position = st.selectbox("Position *", ["PG", "SG", "SF", "PF", "C", "Utility"])
+        availability = st.text_area(
+            "Availability *", max_chars=500,
+            placeholder="Days, times, and time zone",
+        )
+        socials = st.multiselect(
+            "Social platforms shown in your proof",
+            ["Instagram", "TikTok", "YouTube", "X/Twitter"],
+        )
+        owner_proof = st.file_uploader(
+            "Your social proof screenshot(s) *",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key="reg_owner_proof",
+        )
+        roster = []
+        roster_uploads = []
+        if role == "byot_gm":
+            st.markdown("#### BYOT roster")
+            st.caption(
+                "Add at least one player besides yourself. Each player needs "
+                "their Discord ID and social proof."
+            )
+            for index in range(1, 6):
+                with st.expander(f"Roster player {index}", expanded=index == 1):
+                    c1, c2 = st.columns(2)
+                    discord_id = c1.text_input(
+                        "Discord numeric ID", key=f"reg_p{index}_discord", max_chars=25
+                    )
+                    player_gamertag = c2.text_input(
+                        "Gamertag / PSN", key=f"reg_p{index}_tag", max_chars=80
+                    )
+                    c3, c4 = st.columns(2)
+                    player_platform = c3.selectbox(
+                        "Platform", ["PlayStation", "Xbox", "PC", "Other"],
+                        key=f"reg_p{index}_platform",
+                    )
+                    player_position = c4.selectbox(
+                        "Position", ["PG", "SG", "SF", "PF", "C", "Utility"],
+                        key=f"reg_p{index}_position",
+                    )
+                    player_proof = st.file_uploader(
+                        "Social proof screenshot(s)",
+                        type=["png", "jpg", "jpeg", "webp"],
+                        accept_multiple_files=True,
+                        key=f"reg_p{index}_proof",
+                    )
+                    if discord_id or player_gamertag or player_proof:
+                        roster.append({
+                            "discord_id": discord_id.strip(),
+                            "gamertag": player_gamertag.strip(),
+                            "platform": player_platform,
+                            "position": player_position,
+                            "proof_label": f"player_{index}",
+                        })
+                        roster_uploads.extend(
+                            (f"player_{index}", f"player{index}-proof", item)
+                            for item in player_proof
+                        )
+        confirm = st.checkbox(
+            "I confirm this information is accurate and the proof belongs to the listed accounts."
+        )
+        submitted = st.form_submit_button(
+            "Submit for Discord review", type="primary", use_container_width=True
+        )
+    if not submitted:
+        return
+    errors = []
+    if not gamertag.strip():
+        errors.append("your gamertag")
+    if not availability.strip():
+        errors.append("availability")
+    if not owner_proof:
+        errors.append("your social proof")
+    if role == "byot_gm":
+        if not team_name.strip():
+            errors.append("team name")
+        if team_logo is None:
+            errors.append("team logo")
+        if not roster:
+            errors.append("at least one roster player")
+        for number, player in enumerate(roster, 1):
+            if not player["discord_id"].isdigit() or not player["gamertag"]:
+                errors.append(f"valid Discord ID and gamertag for roster entry {number}")
+            if not any(label == player["proof_label"] for label, _, _ in roster_uploads):
+                errors.append(f"social proof for roster entry {number}")
+    if not confirm:
+        errors.append("confirmation")
+    if errors:
+        st.error("Please provide: " + "; ".join(errors) + ".")
+        return
+    payload = {
+        "version": 1,
+        "role": role,
+        "owner_id": str(user["id"]),
+        "owner_name": str(user.get("global_name") or user.get("username") or ""),
+        "gamertag": gamertag.strip(),
+        "platform": platform,
+        "position": position,
+        "availability": availability.strip(),
+        "socials": socials,
+        "team_name": team_name.strip(),
+        "roster": roster,
+        "submitted_at": int(time.time()),
+    }
+    uploads = [
+        ("owner", "owner-proof", item) for item in owner_proof
+    ] + roster_uploads
+    if team_logo is not None:
+        uploads.append(("team_logo", "team-logo", team_logo))
+    try:
+        _submit_streamlit_registration(payload, uploads)
+    except (RuntimeError, ValueError, requests.RequestException) as exc:
+        st.error(f"Registration was not submitted: {exc}")
+        return
+    st.success(
+        "Registration submitted to the Discord review queue. Status and approval "
+        "will sync back to the Hub after the locally running bot processes it."
+    )
 
 
 # Discord linking is optional for browsing the public league pages.
@@ -1296,6 +1516,7 @@ st.sidebar.markdown("""
 VIEWS = [
     "📰 News & Updates",
     "📱 Mobile Hub",
+    "📝 Register",
     "🏠 League Home & Awards",
     "Film Terminal",
     "🌌 Player Galaxy",
@@ -1355,7 +1576,7 @@ if view_mode == "📱 Mobile Hub":
     st.title("📱 QCL Mobile Hub")
     st.caption("Tap a page below. This menu and the News and Film pages open without loading league statistics.")
     for label in [
-        "📰 News & Updates", "Film Terminal", "🏠 League Home & Awards",
+        "📰 News & Updates", "📝 Register", "Film Terminal", "🏠 League Home & Awards",
         "🛡️ League Teams", "🗃️ Full Player Database",
     ]:
         st.button(label, key=f"mobile_{label}", on_click=_go_to_page,
@@ -1371,6 +1592,9 @@ if view_mode == "📰 News & Updates":
     st.button("📱 Open Mobile Hub", on_click=_go_to_page,
               args=("📱 Mobile Hub",), use_container_width=True)
     _render_news()
+    st.stop()
+if view_mode == "📝 Register":
+    _render_registration()
     st.stop()
 if view_mode == "Film Terminal":
     from qcl_film import render as render_film_room
@@ -4126,51 +4350,90 @@ if view_mode in ("🔬 Advanced Analytics Lab", "🌌 Player Galaxy"):
                 "#e6bf55", "#00bfff", "#a855f7", "#58d39a",
                 "#ff6b9d", "#f97316", "#7dd3fc", "#c084fc",
             ]
-            chart = px.scatter_3d(
-                galaxy_view,
-                x="PTS",
-                y="PIE",
-                z="TS%",
-                size="Disruption",
-                color="Type",
-                color_discrete_sequence=neon_types,
-                hover_name="Player/Team",
-                hover_data=[
-                    "Team", "GP", "Shots Affected",
-                    "Tipped Passes", "Hustle",
-                ],
-                template="plotly_dark",
-                size_max=40,
-                title=f"Player Galaxy · sorted by {galaxy_sort_label}",
-            )
-            chart.update_traces(
+            # A real spiral-galaxy layout rather than a Cartesian stat graph.
+            # Higher-ranked players sit nearer the bright core; archetypes form
+            # colored stellar populations along four spiral arms.
+            galaxy_points = galaxy_view.reset_index(drop=True).copy()
+            type_names = sorted(galaxy_points["Type"].fillna("Unknown").unique())
+            type_colors = {
+                name: neon_types[i % len(neon_types)]
+                for i, name in enumerate(type_names)
+            }
+            point_count = max(1, len(galaxy_points))
+            xs, ys, sizes = [], [], []
+            for index, row in galaxy_points.iterrows():
+                identity = f"{row.get('Player/Team', '')}|{row.get('Team', '')}"
+                seed = int(hashlib.sha256(identity.encode()).hexdigest()[:12], 16)
+                arm = seed % 4
+                jitter = ((seed >> 5) % 1000) / 1000 - .5
+                rank_pct = float(row.get("_GalaxyPercentile", 0))
+                radius = .28 + 5.1 * (1 - rank_pct) ** .72
+                radius += jitter * .58
+                theta = (arm * np.pi / 2) + radius * 1.78 + jitter * .48
+                xs.append(radius * np.cos(theta) * 1.35)
+                ys.append(radius * np.sin(theta) * .78)
+                disruption = max(0., float(row.get("Disruption", 0) or 0))
+                sizes.append(10 + min(28, np.sqrt(disruption + 1) * 3.3))
+            galaxy_points["_GalaxyX"] = xs
+            galaxy_points["_GalaxyY"] = ys
+            galaxy_points["_GalaxySize"] = sizes
+            chart = go.Figure()
+            for type_name in type_names:
+                stars = galaxy_points[
+                    galaxy_points["Type"].fillna("Unknown") == type_name
+                ]
+                custom = np.column_stack([
+                    stars["Player/Team"].astype(str),
+                    stars["Team"].astype(str),
+                    stars["GP"].astype(str),
+                    stars["PTS"].round(1).astype(str),
+                    stars["PIE"].round(1).astype(str),
+                    stars["TS%"].round(1).astype(str),
+                    stars["Hustle"].round(1).astype(str),
+                ])
+                chart.add_trace(go.Scattergl(
+                    x=stars["_GalaxyX"], y=stars["_GalaxyY"],
+                    mode="markers", name=type_name,
+                    customdata=custom,
+                    marker=dict(
+                        size=stars["_GalaxySize"],
+                        color=type_colors[type_name],
+                        opacity=.9,
+                        line=dict(width=1, color="rgba(255,255,255,.75)"),
+                    ),
+                    hovertemplate=(
+                        "<b>%{customdata[0]}</b><br>%{customdata[1]}"
+                        "<br>GP %{customdata[2]} · PTS %{customdata[3]}"
+                        "<br>PIE %{customdata[4]} · TS% %{customdata[5]}"
+                        "<br>Hustle %{customdata[6]}<extra>" + type_name + "</extra>"
+                    ),
+                ))
+            # Dense luminous core and faint dust lanes make the data read as a
+            # galaxy even before the animated background is considered.
+            chart.add_trace(go.Scatter(
+                x=[0, 0, 0], y=[0, 0, 0], mode="markers",
                 marker=dict(
-                    opacity=0.90,
-                    line=dict(width=0.8, color="rgba(255,255,255,0.65)"),
+                    size=[110, 64, 22],
+                    color=["rgba(168,85,247,.10)", "rgba(0,191,255,.18)",
+                           "rgba(255,232,168,.94)"],
+                    line=dict(width=0),
                 ),
-                selector=dict(mode="markers"),
-            )
+                hoverinfo="skip", showlegend=False,
+            ))
             chart.update_layout(
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 height=620,
                 legend_title_text="Archetype",
                 margin=dict(l=0, r=0, b=0, t=42),
-                scene=dict(
-                    bgcolor="rgba(0,0,0,0)",
-                    xaxis=dict(
-                        showbackground=False, showgrid=False, zeroline=False,
-                        showticklabels=False, title="Scoring",
-                    ),
-                    yaxis=dict(
-                        showbackground=False, showgrid=False, zeroline=False,
-                        showticklabels=False, title="Impact",
-                    ),
-                    zaxis=dict(
-                        showbackground=False, showgrid=False, zeroline=False,
-                        showticklabels=False, title="Efficiency",
-                    ),
+                title=dict(
+                    text=f"Player Galaxy · stellar rank by {galaxy_sort_label}",
+                    x=.02, font=dict(color="rgba(240,240,255,.82)", size=16),
                 ),
+                xaxis=dict(visible=False, range=[-8, 8], fixedrange=False),
+                yaxis=dict(visible=False, range=[-5, 5], fixedrange=False,
+                           scaleanchor="x", scaleratio=1),
+                hoverlabel=dict(bgcolor="#09051a", bordercolor="#8b5cf6"),
             )
             chart_payload = chart.to_json()
             galaxy_scene = """
@@ -4413,8 +4676,8 @@ if view_mode in ("🔬 Advanced Analytics Lab", "🌌 Player Galaxy"):
             """
             components.html(galaxy_scene, height=700, scrolling=False)
             st.caption(
-                "Drag to rotate the constellation · scroll to zoom · hover a star "
-                "for the player profile."
+                "Scroll to zoom · drag to pan · hover a star for the player profile. "
+                "Higher-ranked players orbit nearer the galactic core."
             )
 
             galaxy_cols = [
