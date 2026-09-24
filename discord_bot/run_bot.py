@@ -12,6 +12,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BOT = os.path.join(HERE, "QCL2K.py")
+LAUNCHER = os.path.join(HERE, "prefix_only.py")
 LAST_GOOD = os.path.join(HERE, "QCL2K.last_good.py")
 
 
@@ -19,6 +20,8 @@ def compile_ok(path: str) -> tuple[bool, str]:
     try:
         py_compile.compile(path, doraise=True)
         py_compile.compile(os.path.join(HERE, "FEDERAL_RESERVE_BOT.py"), doraise=True)
+        py_compile.compile(os.path.join(HERE, "prefix_gateway.py"), doraise=True)
+        py_compile.compile(LAUNCHER, doraise=True)
         return True, ""
     except Exception as exc:
         return False, str(exc)
@@ -47,7 +50,11 @@ def main() -> None:
             print(f"[supervisor] Current source failed validation; using last good: {warning}")
         started = time.time()
         try:
-            code = subprocess.run([sys.executable, target], cwd=HERE).returncode
+            code = subprocess.run(
+                [sys.executable, LAUNCHER],
+                cwd=HERE,
+                env={**os.environ, "QCL_SOURCE": target},
+            ).returncode
         except KeyboardInterrupt:
             return
         elapsed = int(time.time() - started)
