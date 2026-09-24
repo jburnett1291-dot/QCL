@@ -1,0 +1,43 @@
+{
+  "qcl_registrations": {
+    "QCL-1790089885-59609-106": {
+      "people": [
+        {
+          "availability": "All day cst",
+          "discord_tag": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "display_name": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "gamertag_or_psn": "QwikTelevision",
+          "platform": "Xbox",
+          "position": "Pg",
+          "socials": [
+            "TikTok",
+            "Twitch",
+            "X"
+          ]
+        }
+      ],
+      "registration_id": "QCL-1790089885-59609-106",
+      "role": "draft_player",
+      "status": "submitted",
+      "team_name": ""
+    },
+    "QCL-1790204218-59609-716": {
+      "people": [
+        {
+          "availability": "",
+          "discord_tag": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "display_name": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "gamertag_or_psn": "sds",
+          "platform": "sdss",
+          "position": "",
+          "socials": []
+        }
+      ],
+      "registration_id": "QCL-1790204218-59609-716",
+      "role": "byot_gm",
+      "status": "draft",
+      "team_name": "dsd"
+    }
+  },
+  "schema_version": 1
+}
