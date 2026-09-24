@@ -83,66 +83,6 @@ def _rerun():
         st.experimental_rerun()
 
 
-# =============================================================================
-# 0. TITLE SCREEN GATEKEEPER
-# =============================================================================
-# Keep the data engine and the full dashboard off the first render. The user
-# explicitly enters the Hub, then the normal app reruns from the top.
-if "entered_hub" not in st.session_state:
-    st.session_state.entered_hub = False
-
-if not st.session_state.entered_hub:
-    st.markdown(
-        """
-        <style>
-            [data-testid="stSidebar"], [data-testid="stHeader"] {
-                display: none !important;
-            }
-            .splash-container {
-                height: 80vh;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                animation: fadeInScale 1.5s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
-            }
-            .splash-title {
-                color: #e6bf55;
-                font-size: clamp(3rem, 8vw, 5rem);
-                font-weight: 900;
-                letter-spacing: -0.05em;
-                line-height: 1;
-                text-align: center;
-                text-shadow: 0 10px 30px rgba(230, 191, 85, 0.3);
-                text-transform: uppercase;
-            }
-            .splash-subtitle {
-                color: #92979d;
-                font-size: 1.2rem;
-                letter-spacing: 0.2em;
-                margin: 1rem 0 2.5rem;
-                text-align: center;
-            }
-            @keyframes fadeInScale {
-                0% { opacity: 0; transform: scale(0.95) translateY(20px); }
-                100% { opacity: 1; transform: scale(1) translateY(0); }
-            }
-        </style>
-        <div class="splash-container">
-            <div class="splash-title">QCL Analytics</div>
-            <div class="splash-subtitle">THE LEAGUE, AT A GLANCE</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    enter_col = st.columns([1, 1, 1])[1]
-    with enter_col:
-        if st.button("ENTER HUB", use_container_width=True, type="primary"):
-            st.session_state.entered_hub = True
-            _rerun()
-    st.stop()
-
-
 # ==================================================================
 #  QCL login + packs + merged cards (inlined)
 # ==================================================================
@@ -1307,6 +1247,136 @@ st.markdown("""
 
 
 # =============================================================================
+def _render_news():
+    """Public landing page; works even when the new season has no stats."""
+    st.title("📰 News & Updates")
+    st.caption("QCL announcements, registration updates, and league notices.")
+    news = _hub_json(_hub_path("QCL_NEWS_PATH", "qcl_news.json"))
+    posts = news.get("posts", [])
+    if not isinstance(posts, list):
+        posts = []
+    posts = [p for p in posts if isinstance(p, dict) and p.get("title") and p.get("body")]
+    posts.sort(key=lambda p: str(p.get("date", "")), reverse=True)
+    if posts:
+        for post in posts:
+            with st.container(border=True):
+                st.subheader(str(post["title"]))
+                if post.get("date"):
+                    st.caption(str(post["date"]))
+                st.markdown(str(post["body"]))
+                link = str(post.get("url") or "")
+                if link.startswith("https://"):
+                    st.link_button("Read more", link)
+    else:
+        st.info("No announcements have been posted yet. Check back for league and season updates.")
+
+    if st.checkbox("Show registration snapshot", value=False):
+        approved = _official_records()
+        if approved:
+            st.divider()
+            st.subheader("Registration snapshot")
+            gm_count = sum(r.get("role") in {"byot_gm", "draft_gm"} for r in approved)
+            player_count = sum(r.get("role") == "draft_player" for r in approved)
+            c1, c2 = st.columns(2)
+            c1.metric("Approved GM teams", gm_count)
+            c2.metric("Approved draft players", player_count)
+        else:
+            st.caption("No approved registrations are available yet.")
+    st.caption("Use Quick access or the sidebar to browse. Discord linking is optional; approved members can access their desk.")
+
+
+st.sidebar.markdown("""
+<div class="sidebar-brand">
+    <div class="sidebar-brand__mark">QSPN / ANALYTICS</div>
+    <div class="sidebar-brand__title">QCL League Hub</div>
+    <div class="sidebar-brand__sub">The league, at a glance.</div>
+</div>
+""", unsafe_allow_html=True)
+VIEWS = [
+    "📰 News & Updates",
+    "📱 Mobile Hub",
+    "🏠 League Home & Awards",
+    "Film Terminal",
+    "🌌 Player Galaxy",
+    "🏅 Awards & Rewards",
+    "🏆 Power Rankings & SOS",
+    "🏢 Franchise Hub",
+    "🛡️ League Teams",
+    "🔦 Player Spotlight",
+    "🗃️ Full Player Database",
+    "⚔️ Head-to-Head Radar",
+    "🧪 Lineup Lab",
+    "🥊 Rivalry Corner",
+    "🏆 Playoffs",
+    "🔮 Oracle Predictor",
+    "🔬 Advanced Analytics Lab",
+    "🏦 The Vault",
+    "📈 Card Market",
+    "🎴 Qwiks TCG",
+    "👤 My Profile",
+    "🎁 Open Packs",
+    "🃏 Player Cards",
+    "💬 Discord",
+    "📖 Record Book & Milestones",
+]
+if _viewer_access["role"] == "gm":
+    VIEWS.insert(3, "🏢 GM Desk")
+elif _viewer_access["role"] == "player":
+    VIEWS.insert(3, "👥 Players Desk")
+st.sidebar.caption("EXPLORE")
+view_mode = st.sidebar.radio("Navigation", VIEWS, label_visibility="collapsed", key="qcl_nav")
+try:
+    login_widget(key="sidebar")
+except Exception:
+    pass
+st.sidebar.divider()
+if os.path.exists("Logo.png"):
+    st.sidebar.image("Logo.png", width=140)
+
+
+def _open_quick_page():
+    selected = st.session_state["qcl_quick_page"]
+    if selected in VIEWS:
+        st.session_state["qcl_nav"] = selected
+
+
+def _go_to_page(page):
+    st.session_state["qcl_nav"] = page
+
+
+st.selectbox(
+    "📱 Quick access — tap to open a page",
+    ["Choose a page…"] + VIEWS,
+    key="qcl_quick_page",
+    on_change=_open_quick_page,
+)
+if view_mode == "📱 Mobile Hub":
+    st.title("📱 QCL Mobile Hub")
+    st.caption("Tap a page below. This menu and the News and Film pages open without loading league statistics.")
+    for label in [
+        "📰 News & Updates", "Film Terminal", "🏠 League Home & Awards",
+        "🛡️ League Teams", "🗃️ Full Player Database",
+    ]:
+        st.button(label, key=f"mobile_{label}", on_click=_go_to_page,
+                  args=(label,), use_container_width=True)
+    if _viewer_access["role"] == "gm":
+        st.button("🏢 GM Desk", on_click=_go_to_page, args=("🏢 GM Desk",),
+                  use_container_width=True)
+    elif _viewer_access["role"] == "player":
+        st.button("👥 Players Desk", on_click=_go_to_page, args=("👥 Players Desk",),
+                  use_container_width=True)
+    st.stop()
+if view_mode == "📰 News & Updates":
+    st.button("📱 Open Mobile Hub", on_click=_go_to_page,
+              args=("📱 Mobile Hub",), use_container_width=True)
+    _render_news()
+    st.stop()
+if view_mode == "Film Terminal":
+    from qcl_film import render as render_film_room
+    render_film_room()
+    st.stop()
+
+
 # 3. DATA ENGINE
 # =============================================================================
 def basic_name_clean(raw_name):
@@ -2683,60 +2753,6 @@ seasons = sorted([int(s) for s in full_df['Season'].dropna().unique() if int(s) 
 if not seasons:
     _closed_season_desk("No seasons with valid game data were found. GM and registration tools remain open.")
     st.stop()
-
-
-st.sidebar.markdown("""
-<div class="sidebar-brand">
-    <div class="sidebar-brand__mark">QSPN / ANALYTICS</div>
-    <div class="sidebar-brand__title">QCL League Hub</div>
-    <div class="sidebar-brand__sub">The league, at a glance.</div>
-</div>
-""", unsafe_allow_html=True)
-VIEWS = [
-    "🏠 League Home & Awards",
-    "Film Terminal",
-    "🌌 Player Galaxy",
-    "🏅 Awards & Rewards",
-    "🏆 Power Rankings & SOS",
-    "🏢 Franchise Hub",
-    "🛡️ League Teams",
-    "🔦 Player Spotlight",
-    "🗃️ Full Player Database",
-    "⚔️ Head-to-Head Radar",
-    "🧪 Lineup Lab",
-    "🥊 Rivalry Corner",
-    "🏆 Playoffs",
-    "🔮 Oracle Predictor",
-    "🔬 Advanced Analytics Lab",
-    "🏦 The Vault",
-    "📈 Card Market",
-    "🎴 Qwiks TCG",
-    "👤 My Profile",
-    "🎁 Open Packs",
-    "🃏 Player Cards",
-    "💬 Discord",
-    "📖 Record Book & Milestones",
-]
-if _viewer_access["role"] == "gm":
-    VIEWS.insert(1, "🏢 GM Desk")
-elif _viewer_access["role"] == "player":
-    VIEWS.insert(1, "👥 Players Desk")
-st.sidebar.caption("EXPLORE")
-view_mode = st.sidebar.radio("Navigation", VIEWS, label_visibility="collapsed")
-if st.sidebar.button("↩ Replay Intro", use_container_width=True):
-    st.session_state.entered_hub = False
-    _rerun()
-try:
-    login_widget(key="sidebar")
-except Exception:
-    pass
-st.sidebar.divider()
-
-
-# Keep the existing logo asset available for projects that ship it, while the
-# new wordmark above handles the primary navigation treatment.
-if os.path.exists("Logo.png"):
-    st.sidebar.image("Logo.png", width=140)
 
 
 def _season_label(s):
