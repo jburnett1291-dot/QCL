@@ -148,11 +148,11 @@ if not st.session_state.entered_hub:
 # ==================================================================
 import streamlit.components.v1 as components
 # ═══════════════════════════════════════════════════════════════════════════
-#  PERSISTENT DISCORD LOGIN — stays logged in across pages, refresh, revisits
+#  OPTIONAL DISCORD LINKING — required only for the GM / Players desks.
 #
-#  After Discord login we sign a token and stash it in the URL (?qcl=...).
-#  Every page load reads it back, verifies the signature, and restores the
-#  user. So login flows through ALL views and survives refresh.
+#  A signed 30-day token is kept in an encrypted browser cookie when
+#  streamlit-cookies-manager is installed. Existing ?qcl= signed links still
+#  restore a session, and are used as a fallback without cookie support.
 #
 #  Replaces hub_discord_login.py. Same setup (Discord app + secrets), plus one
 #  more secret for signing:
@@ -162,12 +162,8 @@ import streamlit.components.v1 as components
 #        DISCORD_REDIRECT_URI = "https://your-hub.streamlit.app"
 #        QCL_SIGNING_SECRET = "a-unique-random-secret-of-at-least-32-characters"
 #
-#  In app.py, ONCE near the top (after set_page_config):
-#     from hub_persistent_login import restore_session, login_widget, current_user
-#     restore_session()      # <- this makes login persist everywhere
-#  Then anywhere:
-#     user = current_user()  # None or {"id","username","global_name","avatar"}
-#     login_widget()         # shows Login button or "logged in as ..."
+#  Add streamlit-cookies-manager==0.2.0 to requirements.txt for automatic
+#  browser persistence. The league pages remain public without Discord setup.
 # ═══════════════════════════════════════════════════════════════════════════
 
 import requests
@@ -220,6 +216,21 @@ def _verify(token: str):
         return None
 
 
+def _login_cookies():
+    """Browser-persistent login is optional and never blocks public browsing."""
+    if len(_cfg("QCL_SIGNING_SECRET")) < 32:
+        return None
+    try:
+        from streamlit_cookies_manager import EncryptedCookieManager
+    except ImportError:
+        return None
+    manager = EncryptedCookieManager(
+        prefix="qcl-league-hub/",
+        password=_cfg("QCL_SIGNING_SECRET"),
+    )
+    return manager if manager.ready() else None
+
+
 def _exchange_code(code):
     data = {"client_id": _cfg("DISCORD_CLIENT_ID"),
             "client_secret": _cfg("DISCORD_CLIENT_SECRET"),
@@ -245,10 +256,12 @@ def _exchange_code(code):
 
 
 def restore_session():
-    """Restores login from URL token or completes a fresh Discord login safely."""
+    """Restore a 30-day login from a browser cookie or an older signed URL."""
     params = st.query_params
-    # A signed URL token can be revoked in this browser by logging out.
-    if params.get("qcl") and st.session_state.get("discord_user"):
+    if st.session_state.get("discord_user") and st.session_state.get("auth_expires_at", 0) <= time.time():
+        st.session_state.pop("discord_user", None)
+        st.session_state.pop("auth_expires_at", None)
+    if st.session_state.get("discord_user") and not params.get("code"):
         return
 
     # 1. Returning from Discord with ?code=...
@@ -265,25 +278,37 @@ def restore_session():
                  "global_name": user.get("global_name") or user.get("username"),
                  "avatar": user.get("avatar")}
             st.session_state["discord_user"] = u
+            st.session_state["auth_expires_at"] = time.time() + _TOKEN_TTL
             
-            # Persist via signed token in URL
+            # Persist in the browser; never expose a new login token in the URL
+            # when cookie support is installed.
             token = _sign({"id": u["id"], "name": u["global_name"],
                            "avatar": u["avatar"], "exp": time.time() + _TOKEN_TTL})
-            st.query_params["qcl"] = token
+            if _cookies is not None:
+                _cookies["qcl"] = token
+                _cookies.save()
+            else:
+                st.query_params["qcl"] = token
             _rerun()
         else:
             st.error("🚨 Discord Login Failed! Check that your Client ID, Client Secret, and Redirect URI match perfectly in Streamlit Cloud Secrets.")
             st.stop()
         return
 
-    # 2. Persisted token in ?qcl=...
-    tok = params.get("qcl")
+    # 2. Saved cookie (preferred) or existing signed URL link (legacy).
+    tok = _cookies.get("qcl") if _cookies is not None else None
+    tok = tok or params.get("qcl")
     if tok:
         payload = _verify(tok if isinstance(tok, str) else tok[0])
         if payload:
             st.session_state["discord_user"] = {
                 "id": payload["id"], "username": payload["name"],
                 "global_name": payload["name"], "avatar": payload.get("avatar")}
+            st.session_state["auth_expires_at"] = payload["exp"]
+            if _cookies is not None and params.get("qcl"):
+                _cookies["qcl"] = tok
+                _cookies.save()
+                st.query_params.clear()
 
 
 def current_user():
@@ -301,7 +326,7 @@ def login_widget(key="sidebar"):
     """Login button, or a 'logged in as' chip with logout."""
     if not all(_cfg(k) for k in ("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET",
                                   "DISCORD_REDIRECT_URI")) or len(_cfg("QCL_SIGNING_SECRET")) < 32:
-        st.error("Discord sign-in is unavailable. Configure the Discord OAuth settings and a 32+ character QCL_SIGNING_SECRET.")
+        st.caption("Optional Discord linking is unavailable until its OAuth settings and signing secret are configured.")
         return
     u = current_user()
     if u:
@@ -315,6 +340,10 @@ def login_widget(key="sidebar"):
                     f"</div>", unsafe_allow_html=True)
         if c2.button("Log out", key=f"logout_{key}"):
             st.session_state.pop("discord_user", None)
+            st.session_state.pop("auth_expires_at", None)
+            if _cookies is not None and _cookies.get("qcl"):
+                del _cookies["qcl"]
+                _cookies.save()
             st.query_params.clear()
             _rerun()
     else:
@@ -328,8 +357,9 @@ def login_widget(key="sidebar"):
 # =============================================================================
 # ACCESS CONTROL / REGISTRATION DESK
 # =============================================================================
-# qcl_state.json is the bot's authoritative approved GM roster. On a separate
-# Streamlit host, sync an approved-only export to QCL_REGISTRY_PATH. Never grant
+# qcl_state.json is the bot's authoritative registration state. A separate
+# Streamlit host can read a sanitized export from the public QCL repository.
+# Never grant
 # GM access from a client-supplied role, a gamertag, or the old player cards.
 # registrations.json (the bot's /qtcg join feed) grants player access only.
 def _hub_path(setting, default):
@@ -351,6 +381,17 @@ def _hub_json(path):
         return {}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _public_registration_export(url):
+    try:
+        response = requests.get(url, timeout=6)
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+    except (requests.RequestException, ValueError):
+        return {}
+
+
 def _people(record):
     people = record.get("people") or []
     if isinstance(people, dict):
@@ -360,7 +401,11 @@ def _people(record):
 
 def _official_records():
     path = _hub_path("QCL_REGISTRY_PATH", "qcl_state.json")
-    state = _hub_json(path)
+    state = (_hub_json(path) if os.path.isfile(path) else
+             _public_registration_export(_cfg(
+                 "QCL_REGISTRY_URL",
+                 "https://raw.githubusercontent.com/jburnett1291-dot/QCL/main/qcl_registrations.json"
+             )))
     records = state.get("qcl_registrations", state)
     if not isinstance(records, dict):
         return []
@@ -421,9 +466,9 @@ def _contact(discord_id, label):
 def _gm_desk(access):
     """Server-side role check, not just a hidden navigation item."""
     if access["role"] not in {"gm", "player"}:
-        st.error("The GM Desk is for registered players and GMs only.")
+        st.error("Register with the league and link your Discord account to access a desk.")
         return
-    st.header("🏢 GM Desk")
+    st.header("🏢 GM Desk" if access["role"] == "gm" else "👥 Players Desk")
     records = _official_records()
     teams = [r for r in records if r.get("role") in {"byot_gm", "draft_gm"}]
     legacy = _hub_json(_hub_path("QCL_PLAYER_REGISTRATIONS_PATH", "registrations.json"))
@@ -452,7 +497,10 @@ def _gm_desk(access):
                 if members:
                     st.dataframe([{"Player": p.get("display_name") or p.get("discord_tag") or "Player",
                                    "Gamertag": p.get("gamertag_or_psn", ""),
-                                   "Position": p.get("position", "")} for p in members],
+                                   "Position": p.get("position", ""),
+                                   "Availability": p.get("availability", ""),
+                                   "Socials": ", ".join(p.get("socials") or p.get("proof_platforms") or [])}
+                                  for p in members],
                                  hide_index=True, use_container_width=True)
                 else:
                     st.info("No registered roster members yet.")
@@ -476,7 +524,10 @@ def _gm_desk(access):
                 st.info("No registered free agents have been published yet.")
             for uid, person in agents.items():
                 st.write(f"**{person.get('display_name') or person.get('discord_tag') or uid}** · "
-                         f"{person.get('position') or 'Position not listed'}")
+                         f"{person.get('position') or 'Position not listed'} · "
+                         f"{person.get('gamertag_or_psn') or person.get('gamertag') or 'Gamertag not listed'}")
+                st.caption(f"Availability: {person.get('availability') or 'Not listed'} · "
+                           f"Socials: {', '.join(person.get('socials') or person.get('proof_platforms') or []) or 'Not listed'}")
                 _contact(uid, f"Reach out to {person.get('display_name') or uid} on Discord")
         with tabs[4]:
             owned = access["team_records"]
@@ -523,25 +574,20 @@ def _gm_desk(access):
 
 def _closed_season_desk(reason):
     st.warning(reason)
-    st.info("Season analytics are paused, but registration and GM tools remain available.")
-    _gm_desk(_access(current_user()))
+    st.info("Season analytics are paused. Registered members can still use their desk.")
+    access = _access(current_user())
+    if access["role"] in {"gm", "player"}:
+        _gm_desk(access)
+    else:
+        st.caption("League data is public. Link an approved Discord account for desk access.")
+        login_widget(key="empty_season")
 
 
-# Restore before loading the sheet so a new/empty season cannot prevent sign-in.
+# Discord linking is optional for browsing the public league pages.
+_cookies = _login_cookies()
 restore_session()
 _viewer = current_user()
-if not _viewer:
-    st.title("QCL League Hub")
-    st.info("Sign in with Discord to access the league. Registration is required for the GM Desk and rosters.")
-    login_widget(key="entry")
-    st.caption("Register in the QCL Discord using the league's Join QCL or QCL registration flow.")
-    st.stop()
 _viewer_access = _access(_viewer)
-if _viewer_access["role"] == "unregistered":
-    st.title("Registration required")
-    st.info("You are signed in, but your Discord ID is not in the league's registered player list or an approved GM registration. Register in the QCL Discord, then refresh this page.")
-    login_widget(key="pending")
-    st.stop()
 
 
 
@@ -2648,7 +2694,6 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 VIEWS = [
     "🏠 League Home & Awards",
-    "🏢 GM Desk",
     "Film Terminal",
     "🌌 Player Galaxy",
     "🏅 Awards & Rewards",
@@ -2672,6 +2717,10 @@ VIEWS = [
     "💬 Discord",
     "📖 Record Book & Milestones",
 ]
+if _viewer_access["role"] == "gm":
+    VIEWS.insert(1, "🏢 GM Desk")
+elif _viewer_access["role"] == "player":
+    VIEWS.insert(1, "👥 Players Desk")
 st.sidebar.caption("EXPLORE")
 view_mode = st.sidebar.radio("Navigation", VIEWS, label_visibility="collapsed")
 if st.sidebar.button("↩ Replay Intro", use_container_width=True):
@@ -3462,7 +3511,7 @@ def render_merged_cards_v2():
 
 
 
-if view_mode == "🏢 GM Desk":
+if view_mode in {"🏢 GM Desk", "👥 Players Desk"}:
     _gm_desk(_access(current_user()))
 
 if view_mode == "🏠 League Home & Awards":
@@ -6117,7 +6166,7 @@ def _film_signal_fields(text):
 
 
 def _film_analyze_vod(uploaded_file, hud_roi, table_roi, sample_seconds,
-                      max_samples, scan_table):
+                      max_samples, scan_table, progress_callback=None):
     import cv2
     import tempfile
 
@@ -6153,6 +6202,8 @@ def _film_analyze_vod(uploaded_file, hud_roi, table_roi, sample_seconds,
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         sample_interval = max(1, int(fps * sample_seconds))
         frame_id, samples, state = 0, 0, "GAMEPLAY"
+        expected_samples = min(max_samples, max(1, (frame_count + sample_interval - 1) // sample_interval))
+        scan_started = time.monotonic()
 
         while capture.isOpened() and samples < max_samples:
             ok, frame = capture.read()
@@ -6180,6 +6231,10 @@ def _film_analyze_vod(uploaded_file, hud_roi, table_roi, sample_seconds,
                     **_film_signal_fields(text),
                 })
             samples += 1
+            if progress_callback is not None:
+                elapsed = time.monotonic() - scan_started
+                remaining = (expected_samples - samples) * elapsed / samples if samples >= 3 else None
+                progress_callback(samples, expected_samples, remaining)
 
             if postgame_detected and scan_table:
                 try:
@@ -6301,7 +6356,18 @@ def render_film_terminal_page():
         use_container_width=True,
         key="qcl_film_run_ocr",
     ):
-        with st.spinner("Sampling VOD frames and running OCR..."):
+        st.caption("First run: EasyOCR may need to download its detection model. The download has no reliable ETA; the timer starts after initialization.")
+        status = st.empty()
+        status.info("Initializing video reader and OCR models. The first model download can take several minutes.")
+        progress = st.progress(0.0)
+
+        def update_scan(done, total, remaining):
+            progress.progress(min(1.0, done / total))
+            estimate = (f"About {_film_terminal_time(remaining)} left at the current speed."
+                        if remaining is not None else "Calculating remaining time…")
+            status.info(f"Scanning video: {done}/{total} samples. {estimate}")
+
+        try:
             st.session_state["qcl_film_result"] = _film_analyze_vod(
                 uploaded_file,
                 FILM_HUD_PRESETS[hud_name],
@@ -6309,7 +6375,11 @@ def render_film_terminal_page():
                 sample_seconds,
                 max_samples,
                 scan_table,
+                progress_callback=update_scan,
             )
+        finally:
+            progress.empty()
+            status.empty()
 
     result = st.session_state.get("qcl_film_result")
     if not result:
