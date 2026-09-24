@@ -160,7 +160,7 @@ import streamlit.components.v1 as components
 #        DISCORD_CLIENT_ID = "..."
 #        DISCORD_CLIENT_SECRET = "..."
 #        DISCORD_REDIRECT_URI = "https://your-hub.streamlit.app"
-#        QCL_SIGNING_SECRET = "any-long-random-string"
+#        QCL_SIGNING_SECRET = "a-unique-random-secret-of-at-least-32-characters"
 #
 #  In app.py, ONCE near the top (after set_page_config):
 #     from hub_persistent_login import restore_session, login_widget, current_user
@@ -194,22 +194,26 @@ def _cfg(key, default=""):
 
 # ── signed token: {id, name, avatar, exp} base64 + hmac ────────────────────
 def _sign(payload: dict) -> str:
-    secret = _cfg("QCL_SIGNING_SECRET", "change-me").encode()
+    secret = _cfg("QCL_SIGNING_SECRET").encode()
+    if len(secret) < 32:
+        raise RuntimeError("QCL_SIGNING_SECRET must be configured with at least 32 characters.")
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-    sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{sig}"
 
 
 def _verify(token: str):
     try:
         body, sig = token.split(".", 1)
-        secret = _cfg("QCL_SIGNING_SECRET", "change-me").encode()
-        good = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:16]
+        secret = _cfg("QCL_SIGNING_SECRET").encode()
+        if len(secret) < 32:
+            return None
+        good = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, good):
             return None
         pad = "=" * (-len(body) % 4)
         payload = json.loads(base64.urlsafe_b64decode(body + pad))
-        if payload.get("exp", 0) < time.time():
+        if payload.get("exp", 0) < time.time() or not str(payload.get("id", "")).isdigit():
             return None
         return payload
     except Exception:
@@ -242,10 +246,10 @@ def _exchange_code(code):
 
 def restore_session():
     """Restores login from URL token or completes a fresh Discord login safely."""
-    if st.session_state.get("discord_user"):
-        return
-
     params = st.query_params
+    # A signed URL token can be revoked in this browser by logging out.
+    if params.get("qcl") and st.session_state.get("discord_user"):
+        return
 
     # 1. Returning from Discord with ?code=...
     code = params.get("code")
@@ -266,7 +270,7 @@ def restore_session():
             token = _sign({"id": u["id"], "name": u["global_name"],
                            "avatar": u["avatar"], "exp": time.time() + _TOKEN_TTL})
             st.query_params["qcl"] = token
-            st.rerun()
+            _rerun()
         else:
             st.error("🚨 Discord Login Failed! Check that your Client ID, Client Secret, and Redirect URI match perfectly in Streamlit Cloud Secrets.")
             st.stop()
@@ -295,8 +299,9 @@ def _login_url():
 
 def login_widget(key="sidebar"):
     """Login button, or a 'logged in as' chip with logout."""
-    if not _cfg("DISCORD_CLIENT_ID"):
-        st.caption("🔒 Discord login not configured yet.")
+    if not all(_cfg(k) for k in ("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET",
+                                  "DISCORD_REDIRECT_URI")) or len(_cfg("QCL_SIGNING_SECRET")) < 32:
+        st.error("Discord sign-in is unavailable. Configure the Discord OAuth settings and a 32+ character QCL_SIGNING_SECRET.")
         return
     u = current_user()
     if u:
@@ -305,19 +310,238 @@ def login_widget(key="sidebar"):
              if u.get("avatar") else "https://cdn.discordapp.com/embed/avatars/0.png")
         c1.markdown(f"<div style='display:flex;align-items:center;gap:8px;'>"
                     f"<img src='{av}' width='28' style='border-radius:50%;'>"
-                    f"<span style='color:#fff;font-weight:700;'>{u['global_name']}</span>"
+                     f"<span style='color:#fff;font-weight:700;'>{_html.escape(str(u['global_name']))}</span>"
                     f"<span style='color:#3ba55d;font-size:12px;'>✓ verified</span>"
                     f"</div>", unsafe_allow_html=True)
         if c2.button("Log out", key=f"logout_{key}"):
             st.session_state.pop("discord_user", None)
             st.query_params.clear()
-            st.rerun()
+            _rerun()
     else:
         st.markdown(
-            f"<a href='{_login_url()}' target='_blank' style='display:inline-block;"
+            f"<a href='{_login_url()}' style='display:inline-block;"
             f"background:#5865F2;color:#fff;font-weight:800;padding:10px 20px;"
             f"border-radius:10px;text-decoration:none;'>🔗 Login with Discord</a>",
             unsafe_allow_html=True)
+
+
+# =============================================================================
+# ACCESS CONTROL / REGISTRATION DESK
+# =============================================================================
+# qcl_state.json is the bot's authoritative approved GM roster. On a separate
+# Streamlit host, sync an approved-only export to QCL_REGISTRY_PATH. Never grant
+# GM access from a client-supplied role, a gamertag, or the old player cards.
+# registrations.json (the bot's /qtcg join feed) grants player access only.
+def _hub_path(setting, default):
+    root = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(_cfg(setting, os.path.join(root, default)))
+
+
+def _hub_json(path):
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object")
+        return data
+    except (OSError, ValueError) as exc:
+        st.error(f"Registration data unavailable: {type(exc).__name__}. Access remains closed.")
+        return {}
+
+
+def _people(record):
+    people = record.get("people") or []
+    if isinstance(people, dict):
+        people = list(people.values())
+    return [person for person in people if isinstance(person, dict)] if isinstance(people, list) else []
+
+
+def _official_records():
+    path = _hub_path("QCL_REGISTRY_PATH", "qcl_state.json")
+    state = _hub_json(path)
+    records = state.get("qcl_registrations", state)
+    if not isinstance(records, dict):
+        return []
+    # Draft/submitted/needs-info registrations must not reveal rosters or grant roles.
+    return [r for r in records.values() if isinstance(r, dict)
+            and r.get("status") == "approved"
+            and r.get("role") in {"byot_gm", "draft_gm", "draft_player"}]
+
+
+def _access(user):
+    if not user or not str(user.get("id", "")).isdigit():
+        return {"role": "guest", "team_records": []}
+    uid = str(user["id"])
+    records = _official_records()
+    owned = [r for r in records if r.get("role") in {"byot_gm", "draft_gm"}
+             and str(r.get("owner_id", "")) == uid]
+    if owned:
+        return {"role": "gm", "team_records": owned}
+    if any(str(p.get("discord_id", "")) == uid for r in records for p in _people(r)):
+        return {"role": "player", "team_records": []}
+    legacy = _hub_json(_hub_path("QCL_PLAYER_REGISTRATIONS_PATH", "registrations.json"))
+    if isinstance(legacy.get(uid), dict) and str(legacy[uid].get("discord_id", uid)) == uid:
+        return {"role": "player", "team_records": []}
+    return {"role": "unregistered", "team_records": []}
+
+
+def _branding():
+    return _hub_json(_hub_path("QCL_BRANDING_PATH", "qcl_team_branding.json"))
+
+
+def _team_label(record, brand):
+    rid = str(record.get("registration_id", ""))
+    return str(brand.get(rid, {}).get("display_name") or record.get("team_name") or "Unnamed team")
+
+
+def _brand_for_team(team):
+    # Keep the statistical team key untouched; only change the displayed brand.
+    for record in _official_records():
+        if record.get("role") in {"byot_gm", "draft_gm"} and str(record.get("team_name", "")).casefold() == str(team).casefold():
+            return _branding().get(str(record.get("registration_id", "")), {})
+    return {}
+
+
+def _team_brand_preview(record, brand):
+    saved = brand.get(str(record.get("registration_id", "")), {})
+    logo = saved.get("logo_url", "")
+    if isinstance(logo, str) and logo.startswith("https://"):
+        st.image(logo, width=100)
+    if saved.get("tagline"):
+        st.caption(str(saved["tagline"]))
+
+
+def _contact(discord_id, label):
+    if str(discord_id).isdigit():
+        st.link_button(label, f"https://discord.com/users/{discord_id}")
+
+
+def _gm_desk(access):
+    """Server-side role check, not just a hidden navigation item."""
+    if access["role"] not in {"gm", "player"}:
+        st.error("The GM Desk is for registered players and GMs only.")
+        return
+    st.header("🏢 GM Desk")
+    records = _official_records()
+    teams = [r for r in records if r.get("role") in {"byot_gm", "draft_gm"}]
+    legacy = _hub_json(_hub_path("QCL_PLAYER_REGISTRATIONS_PATH", "registrations.json"))
+    brand = _branding()
+    st.caption("Only approved teams and registrations appear here. Contact opens a Discord profile; it never sends a message for you.")
+    labels = ["GMs", "Rosters", "Stats & seasons"]
+    if access["role"] == "gm":
+        labels += ["Free agents", "Manage my team"]
+    tabs = st.tabs(labels)
+    with tabs[0]:
+        if not teams:
+            st.info("No approved GM teams are available yet. Ask the league to sync its approved bot registration file.")
+        for record in teams:
+            name = _team_label(record, brand)
+            st.subheader(name)
+            _team_brand_preview(record, brand)
+            st.caption(f"{record.get('role', '').replace('_', ' ').upper()} · {len(_people(record))} registered people")
+            _contact(record.get("owner_id"), "Reach out to GM on Discord")
+    with tabs[1]:
+        if not teams:
+            st.info("No approved team rosters have been published.")
+        for record in teams:
+            with st.expander(_team_label(record, brand)):
+                _team_brand_preview(record, brand)
+                members = _people(record)
+                if members:
+                    st.dataframe([{"Player": p.get("display_name") or p.get("discord_tag") or "Player",
+                                   "Gamertag": p.get("gamertag_or_psn", ""),
+                                   "Position": p.get("position", "")} for p in members],
+                                 hide_index=True, use_container_width=True)
+                else:
+                    st.info("No registered roster members yet.")
+    with tabs[2]:
+        st.info("Use the Data Scope selector in the sidebar to browse prior QCL and SPAM seasons. The current season stays pending until games reach the sheet.")
+        st.metric("Approved teams", len(teams))
+        st.metric("Approved player registrations", sum(r.get("role") == "draft_player" for r in records))
+    if access["role"] == "gm":
+        with tabs[3]:
+            agents = {}
+            for record in records:
+                if record.get("role") == "draft_player":
+                    for person in _people(record):
+                        uid = str(person.get("discord_id", ""))
+                        if uid.isdigit():
+                            agents[uid] = person
+            for uid, person in legacy.items():
+                if isinstance(person, dict) and str(uid).isdigit() and not person.get("team"):
+                    agents.setdefault(str(uid), person)
+            if not agents:
+                st.info("No registered free agents have been published yet.")
+            for uid, person in agents.items():
+                st.write(f"**{person.get('display_name') or person.get('discord_tag') or uid}** · "
+                         f"{person.get('position') or 'Position not listed'}")
+                _contact(uid, f"Reach out to {person.get('display_name') or uid} on Discord")
+        with tabs[4]:
+            owned = access["team_records"]
+            record = st.selectbox("Your approved team", owned,
+                                  format_func=lambda r: _team_label(r, brand))
+            rid = str(record.get("registration_id", ""))
+            if not rid:
+                st.error("This team has no registration ID; changes are disabled.")
+            else:
+                saved = brand.get(rid, {})
+                with st.form(f"brand_{rid}"):
+                    name = st.text_input("Hub team display name", value=saved.get("display_name") or record.get("team_name", ""), max_chars=48)
+                    tagline = st.text_input("Tagline", value=saved.get("tagline", ""), max_chars=90)
+                    logo = st.text_input("HTTPS logo URL", value=saved.get("logo_url", ""), max_chars=500)
+                    submitted = st.form_submit_button("Save team branding")
+                if submitted:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(logo.strip())
+                    if (not name.strip() or not re.fullmatch(r"[\w .&'-]+", name.strip()) or
+                            (logo.strip() and (parsed.scheme != "https" or not parsed.netloc or
+                                               not re.fullmatch(r"[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+", logo.strip())))):
+                        st.error("Enter a team name using letters, numbers and basic punctuation, and use an HTTPS logo URL.")
+                    elif rid not in {str(r.get("registration_id")) for r in _access(current_user())["team_records"]}:
+                        st.error("Team ownership changed. No changes were saved.")
+                    else:
+                        path = _hub_path("QCL_BRANDING_PATH", "qcl_team_branding.json")
+                        latest = _hub_json(path)
+                        latest[rid] = {"display_name": name.strip(), "tagline": tagline.strip(),
+                                       "logo_url": logo.strip()}
+                        try:
+                            tmp = f"{path}.{os.getpid()}.tmp"
+                            with open(tmp, "w", encoding="utf-8") as fh:
+                                json.dump(latest, fh, indent=2, ensure_ascii=False)
+                            os.replace(tmp, path)
+                            st.success("Hub branding saved. Official bot and sheet team names are unchanged.")
+                            _rerun()
+                        except OSError:
+                            st.error("Could not save branding. Configure a writable, persistent QCL_BRANDING_PATH.")
+                if saved.get("logo_url", "").startswith("https://"):
+                    st.image(saved["logo_url"], width=120)
+                if saved.get("tagline"):
+                    st.caption(saved["tagline"])
+
+
+def _closed_season_desk(reason):
+    st.warning(reason)
+    st.info("Season analytics are paused, but registration and GM tools remain available.")
+    _gm_desk(_access(current_user()))
+
+
+# Restore before loading the sheet so a new/empty season cannot prevent sign-in.
+restore_session()
+_viewer = current_user()
+if not _viewer:
+    st.title("QCL League Hub")
+    st.info("Sign in with Discord to access the league. Registration is required for the GM Desk and rosters.")
+    login_widget(key="entry")
+    st.caption("Register in the QCL Discord using the league's Join QCL or QCL registration flow.")
+    st.stop()
+_viewer_access = _access(_viewer)
+if _viewer_access["role"] == "unregistered":
+    st.title("Registration required")
+    st.info("You are signed in, but your Discord ID is not in the league's registered player list or an approved GM registration. Register in the QCL Discord, then refresh this page.")
+    login_widget(key="pending")
+    st.stop()
 
 
 
@@ -1064,29 +1288,53 @@ def name_match_key(name):
 @st.cache_data(ttl=60, show_spinner="Pulling the league sheet...")
 def load_data():
     try:
-        df = pd.read_csv(URL)
-        df.columns = df.columns.str.strip()
-
+        from io import StringIO
+        frames = []
+        health = {}
+        try:
+            response = requests.get(URL, timeout=12)
+            response.raise_for_status()
+            live = pd.read_csv(StringIO(response.text))
+            live.columns = live.columns.str.strip()
+            if {'Player/Team', 'Team Name', 'Season', 'Game_ID', 'Type'}.issubset(live.columns):
+                frames.append(live)
+                health['Google Sheet'] = 'Available'
+            else:
+                health['Google Sheet'] = 'No usable game rows'
+        except (requests.RequestException, pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeError):
+            health['Google Sheet'] = 'Offline / season pending'
 
         # --- merge SPAM history (Seasons 1-6) if the CSV is in the repo ---
         try:
             _root = os.path.dirname(os.path.abspath(__file__))
         except NameError:
             _root = os.getcwd()
-        for _spam_name in ("SPAM_Raw_Data_v2.csv", "spam_history.csv"):
-            _sp_path = os.path.join(_root, _spam_name)
+        _history_path = _cfg("QCL_HISTORY_CSV_PATH")
+        for _spam_name in ([_history_path] if _history_path else []) + ["SPAM_Raw_Data_v2.csv", "spam_history.csv"]:
+            if not _spam_name:
+                continue
+            _sp_path = _spam_name if os.path.isabs(_spam_name) else os.path.join(_root, _spam_name)
             if os.path.exists(_sp_path):
                 try:
                     _sp = pd.read_csv(_sp_path)
                     _sp.columns = _sp.columns.str.strip()
-                    # namespace SPAM seasons -> 101..106 so they never collide with QCL 1..6
-                    _sp["Season"] = pd.to_numeric(_sp.get("Season"), errors="coerce") + 100
-                    _sp = _sp[_sp["Season"].notna()]
-                    df = pd.concat([df, _sp], ignore_index=True)
-                except Exception:
-                    pass
-                break
-        health = {}
+                    if {'Player/Team', 'Team Name', 'Season', 'Game_ID', 'Type'}.issubset(_sp.columns):
+                        # The named SPAM files use 1..6; an explicit history file
+                        # may already contain QCL and namespaced SPAM seasons.
+                        if not _history_path or _spam_name != _history_path:
+                            _sp["Season"] = pd.to_numeric(_sp["Season"], errors="coerce") + 100
+                        _sp = _sp[_sp["Season"].notna()]
+                        if not _sp.empty:
+                            frames.append(_sp)
+                            health['Historical CSV'] = os.path.basename(_sp_path)
+                            break
+                except (OSError, ValueError, pd.errors.ParserError, pd.errors.EmptyDataError):
+                    health['Historical CSV'] = 'Unreadable'
+        if not frames:
+            return {'df': pd.DataFrame(), 'health': health}
+        df = pd.concat(frames, ignore_index=True)
+        if df.empty:
+            return {'df': df, 'health': health}
         df = df[df['Player/Team'] != 'Player/Team']
         df = df[df['Team Name'].notna()
                 & (df['Team Name'].astype(str).str.strip() != '')
@@ -1323,7 +1571,7 @@ DATA_HEALTH = _loaded['health']
 
 
 if full_df is None or full_df.empty:
-    st.warning("Sheet loaded but contains no usable rows.")
+    _closed_season_desk("No games are available in Google Sheets or the historical CSV yet. Season analytics are paused.")
     st.stop()
 
 
@@ -1654,6 +1902,9 @@ def _logo_path(team):
 
 
 def find_team_logo_uri(team):
+    brand = _brand_for_team(team)
+    if brand.get("logo_url"):
+        return brand["logo_url"]
     p = _logo_path(team)
     return _data_uri(p) if p else ""
 
@@ -1849,7 +2100,6 @@ def render_rotating_card(player, key="rc", team=None, height=440, speed_ms=4000)
 
 
 
-@st.cache_data(ttl=120)
 def _cached_logo_uri(team):
     return find_team_logo_uri(team)
 
@@ -1915,7 +2165,7 @@ def team_color(team, default=GOLD):
 
 
 def team_full(team):
-    return _team_entry(team).get("full") or team
+    return _brand_for_team(team).get("display_name") or _team_entry(team).get("full") or team
 
 
 
@@ -2385,7 +2635,7 @@ def toggle_watch(name):
 # =============================================================================
 seasons = sorted([int(s) for s in full_df['Season'].dropna().unique() if int(s) > 0], reverse=True)
 if not seasons:
-    st.warning("No seasons with valid data found.")
+    _closed_season_desk("No seasons with valid game data were found. GM and registration tools remain open.")
     st.stop()
 
 
@@ -2398,6 +2648,7 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 VIEWS = [
     "🏠 League Home & Awards",
+    "🏢 GM Desk",
     "Film Terminal",
     "🌌 Player Galaxy",
     "🏅 Awards & Rewards",
@@ -2427,7 +2678,6 @@ if st.sidebar.button("↩ Replay Intro", use_container_width=True):
     st.session_state.entered_hub = False
     _rerun()
 try:
-    restore_session()
     login_widget(key="sidebar")
 except Exception:
     pass
@@ -2448,6 +2698,14 @@ _qcl_seasons = sorted([s for s in seasons if s < 100], reverse=True)
 _spam_seasons = sorted([s for s in seasons if s >= 100], reverse=True)
 _ordered_seasons = _qcl_seasons + _spam_seasons
 _season_labels = [_season_label(s) for s in _ordered_seasons]
+_active_season = str(_cfg("QCL_ACTIVE_SEASON", "")).strip()
+if _active_season:
+    try:
+        _active_number = int(_active_season)
+        if _active_number not in _ordered_seasons:
+            st.sidebar.warning(f"Season {_active_season} has not started or has no usable stats. Historical seasons remain available below.")
+    except ValueError:
+        st.sidebar.warning("QCL_ACTIVE_SEASON must be a number. Historical seasons remain available.")
 _career_opts = ["Career (All-Time)"]
 if _qcl_seasons and _spam_seasons:
     _career_opts += ["Career (QCL)", "Career (SPAM)"]
@@ -2511,6 +2769,8 @@ if game_type != "All Games":
 
 
 st.markdown(f'<div class="header-banner">🏀 QCL LEAGUE HUB — {banner_text}</div>', unsafe_allow_html=True)
+if DATA_HEALTH.get("Google Sheet") != "Available":
+    st.warning("Current-season sheet stats are unavailable or not started. Historical seasons in the Data Scope selector remain available; GM and registration tools are still open.")
 
 
 # optional, right after the header-banner markdown
@@ -2519,7 +2779,7 @@ if os.path.exists("Logo.png"):
 
 
 if df_active.empty:
-    st.warning("No games match the current scope / game-type filter.")
+    _closed_season_desk("No games match this season or game-type filter. Choose another season in the sidebar to see historical stats.")
     st.stop()
 
 
@@ -2652,7 +2912,7 @@ def compute_stats(scope_df, full_df, min_gp_filter=0):
 
 _S = compute_stats(df_active, full_df, min_gp_filter)
 if _S is None:
-    st.warning("Not enough player/team rows in this scope to build stats.")
+    _closed_season_desk("This scope has no player/team stat rows yet. Choose a historical season in the sidebar.")
     st.stop()
 p_df, t_df = _S['p_df'], _S['t_df']
 p_stats, t_stats, p_view = _S['p_stats'], _S['t_stats'], _S['p_view']
@@ -3201,6 +3461,9 @@ def render_merged_cards_v2():
 
 
 
+
+if view_mode == "🏢 GM Desk":
+    _gm_desk(_access(current_user()))
 
 if view_mode == "🏠 League Home & Awards":
     hc1, hc2, hc3, hc4 = st.columns(4)
