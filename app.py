@@ -90,8 +90,8 @@ import streamlit.components.v1 as components
 # ═══════════════════════════════════════════════════════════════════════════
 #  OPTIONAL DISCORD LINKING — required only for the GM / Players desks.
 #
-#  A signed 30-day token is kept in an encrypted browser cookie when
-#  streamlit-cookies-manager is installed. Existing ?qcl= signed links still
+#  A signed 30-day token is kept in an encrypted browser cookie only on
+#  compatible Streamlit versions. Existing ?qcl= signed links still
 #  restore a session, and are used as a fallback without cookie support.
 #
 #  Replaces hub_discord_login.py. Same setup (Discord app + secrets), plus one
@@ -102,8 +102,8 @@ import streamlit.components.v1 as components
 #        DISCORD_REDIRECT_URI = "https://your-hub.streamlit.app"
 #        QCL_SIGNING_SECRET = "a-unique-random-secret-of-at-least-32-characters"
 #
-#  Add streamlit-cookies-manager==0.2.0 to requirements.txt for automatic
-#  browser persistence. The league pages remain public without Discord setup.
+#  The league pages remain public without Discord setup. Cookie persistence
+#  is optional; the old manager is incompatible with current Streamlit.
 # ═══════════════════════════════════════════════════════════════════════════
 
 import requests
@@ -162,7 +162,8 @@ def _login_cookies():
         return None
     try:
         from streamlit_cookies_manager import EncryptedCookieManager
-    except ImportError:
+    except (ImportError, AttributeError):
+        # The legacy package imports st.cache, removed in newer Streamlit.
         return None
     manager = EncryptedCookieManager(
         prefix="qcl-league-hub/",
