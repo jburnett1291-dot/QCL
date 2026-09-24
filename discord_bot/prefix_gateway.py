@@ -7,6 +7,7 @@ commands and removing the application commands from Discord's command tree.
 
 import asyncio
 import inspect
+import os
 import shlex
 from types import SimpleNamespace
 from typing import get_args, get_origin
@@ -33,22 +34,29 @@ class _ModalLauncher(discord.ui.View):
 
 
 class _Response:
-    def __init__(self, interaction):
+    def __init__(self, interaction, *, followup=False):
         self.interaction = interaction
         self.done = False
+        self.followup = followup
 
     def is_done(self):
         return self.done
 
     async def defer(self, **kwargs):
         self.done = True
+        self.interaction._deferred_private = bool(kwargs.get("ephemeral"))
         if kwargs.get("thinking"):
-            self.interaction._last_message = await self.interaction.context.send(
-                "Working on that..."
+            target = (
+                self.interaction.context.author
+                if self.interaction._deferred_private
+                else self.interaction.context
             )
+            self.interaction._last_message = await target.send("Working on that...")
 
-    async def send_message(self, content=None, *, ephemeral=False, **kwargs):
+    async def send_message(self, content=None, *, ephemeral=None, **kwargs):
         self.done = True
+        if ephemeral is None:
+            ephemeral = self.followup and self.interaction._deferred_private
         target = self.interaction.context
         # Never expose an ephemeral response (potentially containing account
         # details) to the channel; send it privately instead.
@@ -96,8 +104,9 @@ class _PrefixInteraction:
         self.app_permissions = context.channel.permissions_for(context.guild.me)
         self.data = {}
         self.response = _Response(self)
-        self.followup = _Response(self)
+        self.followup = _Response(self, followup=True)
         self._last_message = None
+        self._deferred_private = False
         self.namespace = SimpleNamespace()
 
     async def original_response(self):
@@ -127,13 +136,11 @@ def _commands_by_path(tree):
     return result
 
 
-async def _pin_from_dm(ctx):
+async def _pin_from_dm(ctx, label):
     try:
-        await ctx.message.delete()
-    except (discord.Forbidden, discord.HTTPException):
-        pass
-    try:
-        await ctx.author.send("Reply here with your admin PIN within 60 seconds. It will not appear in the server.")
+        await ctx.author.send(
+            f"Reply here with {label} within 60 seconds. It will not appear in the server."
+        )
     except discord.Forbidden:
         raise ValueError("Enable DMs so I can request the admin PIN privately.")
 
@@ -213,6 +220,17 @@ async def _invoke(ctx, command, raw):
         tokens = shlex.split(raw)
         signature = inspect.signature(command.callback)
         parameters = list(signature.parameters.values())[1:]
+        pin_names = {p.name for p in parameters if "pin" in p.name.casefold()}
+        if pin_names:
+            try:
+                await ctx.message.delete()
+            except discord.NotFound:
+                pass
+            except (discord.Forbidden, discord.HTTPException):
+                raise ValueError(
+                    "I need Manage Messages permission to remove PIN-related commands "
+                    "from this channel. Ask an admin to grant it before retrying."
+                )
         options = {p.name: p for p in command.parameters}
         named = {}
         positional = []
@@ -223,14 +241,17 @@ async def _invoke(ctx, command, raw):
             else:
                 positional.append(token)
         kwargs = {}
+        attachments = iter(ctx.message.attachments)
         for index, parameter in enumerate(parameters):
             name = parameter.name
             annotation = parameter.annotation
-            if name == "pin":
-                if name in named or (positional and len(positional) > index):
-                    raise ValueError("Do not post a PIN in a server channel. Leave it out; I will DM you.")
-                kwargs[name] = await _pin_from_dm(ctx)
+            if name in pin_names:
                 continue
+            if annotation is discord.Attachment and name not in named:
+                attachment = next(attachments, None)
+                if attachment is not None:
+                    kwargs[name] = attachment
+                    continue
             if name in named:
                 raw_value = named.pop(name)
             elif positional:
@@ -242,16 +263,15 @@ async def _invoke(ctx, command, raw):
                     positional.clear()
                 else:
                     raw_value = positional.pop(0)
-            elif annotation is discord.Attachment and ctx.message.attachments:
-                kwargs[name] = ctx.message.attachments.pop(0)
-                continue
             elif parameter.default is not inspect.Parameter.empty:
                 continue
             else:
                 raise ValueError(f"Missing {name}. Use !commands {command.qualified_name} for usage.")
             kwargs[name] = _convert(raw_value, annotation, options.get(name), ctx)
         if positional or named:
-            raise ValueError("Too many arguments, or an unknown option name.")
+            raise ValueError("Do not include PINs or extra arguments in a server message.")
+        for name in pin_names:
+            kwargs[name] = await _pin_from_dm(ctx, name.replace("_", " "))
         await command.callback(interaction, **kwargs)
     except (ValueError, TypeError, app_commands.AppCommandError) as error:
         await ctx.send(f"Command not run: {error}")
@@ -281,7 +301,7 @@ async def install_prefix_commands(bot, allowed_guild_ids):
                 if command is not None:
                     params = " ".join(
                         f"<{p.name}>" if p.required else f"[{p.name}]"
-                        for p in command.parameters if p.name != "pin"
+                        for p in command.parameters if "pin" not in p.name.casefold()
                     )
                     return await ctx.send(
                         f"Usage: !{' '.join(parts)} {params}\n"
@@ -338,8 +358,17 @@ async def install_prefix_commands(bot, allowed_guild_ids):
     bot.tree.clear_commands(guild=None)
     # Remove stale global commands from the previous deployment, too.
     await bot.tree.sync()
-    for guild_id in allowed_guild_ids:
+    historical_guilds = set(allowed_guild_ids)
+    old_guild = os.getenv("GUILD_ID", "1406018430607298693")
+    if old_guild.isdecimal():
+        historical_guilds.add(int(old_guild))
+    for guild_id in historical_guilds:
         guild = discord.Object(id=guild_id)
         bot.tree.clear_commands(guild=guild)
-        await bot.tree.sync(guild=guild)
+        try:
+            await bot.tree.sync(guild=guild)
+        except discord.HTTPException:
+            if guild_id in allowed_guild_ids:
+                raise
+            print(f"[Prefix] Could not clear old slash registrations in guild {guild_id}.")
     print(f"[Prefix] Enabled {len(handlers)} prefix handlers; removed Discord slash commands.")
