@@ -281,7 +281,7 @@ async def install_prefix_commands(bot, allowed_guild_ids):
                 if command is not None:
                     params = " ".join(
                         f"<{p.name}>" if p.required else f"[{p.name}]"
-                        for p in command.parameters
+                        for p in command.parameters if p.name != "pin"
                     )
                     return await ctx.send(
                         f"Usage: !{' '.join(parts)} {params}\n"
@@ -296,7 +296,8 @@ async def install_prefix_commands(bot, allowed_guild_ids):
                 return await ctx.send("Unknown command path.")
             await ctx.send(
                 "Prefix commands: " + ", ".join(
-                    f"!{root}" for root in sorted(by_root)
+                    f"!{root if bot.get_command(root) is not None else root + '_app'}"
+                    for root in sorted(by_root)
                 )[:1800] + "\nUse !commands <name> for subcommands and usage."
             )
 
