@@ -210,7 +210,7 @@ def _convert(raw, annotation, param, ctx):
     return raw
 
 
-async def _invoke(ctx, command, raw):
+async def _invoke(ctx, command, raw, module=None):
     if ctx.guild is None:
         return await ctx.send("This bot only accepts commands in its home server.")
     try:
@@ -241,6 +241,10 @@ async def _invoke(ctx, command, raw):
             else:
                 positional.append(token)
         kwargs = {}
+        season_defaults = {}
+        if module is not None and command.qualified_name == "season_admin create":
+            saved = module.load_state().get("qcl_admin_template", {})
+            season_defaults = saved.get("season", {}) if isinstance(saved, dict) else {}
         attachments = iter(ctx.message.attachments)
         for index, parameter in enumerate(parameters):
             name = parameter.name
@@ -263,11 +267,35 @@ async def _invoke(ctx, command, raw):
                     positional.clear()
                 else:
                     raw_value = positional.pop(0)
-            elif parameter.default is not inspect.Parameter.empty:
+            elif (
+                module is not None
+                and command.qualified_name == "season_admin create"
+                and name in {"days", "reveal_hour", "window_hours"}
+                and name in season_defaults
+            ):
+                kwargs[name] = season_defaults[name]
                 continue
+            elif parameter.default is not inspect.Parameter.empty:
+                default = parameter.default
+                setting_name = {
+                    "days": "default_days",
+                    "reveal_hour": "reveal_hour",
+                    "window_hours": "window_hours",
+                }.get(name)
+                if (
+                    module is not None
+                    and command.qualified_name == "season_admin create"
+                    and setting_name in season_defaults
+                ):
+                    default = season_defaults[setting_name]
+                    kwargs[name] = default
+                if default is parameter.default:
+                    continue
+                raw_value = str(default)
             else:
                 raise ValueError(f"Missing {name}. Use !commands {command.qualified_name} for usage.")
-            kwargs[name] = _convert(raw_value, annotation, options.get(name), ctx)
+            if name not in kwargs:
+                kwargs[name] = _convert(raw_value, annotation, options.get(name), ctx)
         if positional or named:
             raise ValueError("Do not include PINs or extra arguments in a server message.")
         for name in pin_names:
@@ -277,7 +305,7 @@ async def _invoke(ctx, command, raw):
         await ctx.send(f"Command not run: {error}")
 
 
-async def install_prefix_commands(bot, allowed_guild_ids):
+async def install_prefix_commands(bot, allowed_guild_ids, module=None):
     """Register all legacy handlers as text commands and delete remote slash commands."""
     handlers = _commands_by_path(bot.tree)
     by_root = {}
@@ -346,7 +374,7 @@ async def install_prefix_commands(bot, allowed_guild_ids):
             command = routes.get(path)
             if command is None:
                 return await ctx.send(f"Unknown subcommand. Try !{_root} without arguments.")
-            await _invoke(ctx, command, shlex.join(tokens))
+            await _invoke(ctx, command, shlex.join(tokens), module=module)
 
         # discord.py's parser must see only ctx and a keyword-only raw string.
         dispatch.__signature__ = inspect.Signature([

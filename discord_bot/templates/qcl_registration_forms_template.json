@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "instructions": [
+    "Fill registrations with one object per applicant or team.",
+    "Use the applicant's numeric Discord ID or <@ID> in owner_id.",
+    "Each person needs a Discord ID so their registration is indexed to that account.",
+    "Leave registration_id blank to create a record. Use an existing ID to update one.",
+    "Allowed roles: byot_gm, draft_gm, draft_player.",
+    "Allowed statuses: draft, submitted, needs_review, needs_info, approved, rejected, cancelled.",
+    "Import adds or updates listed records; it never deletes unlisted records."
+  ],
+  "form_types": {
+    "byot_gm": {
+      "label": "BYOT GM",
+      "fields": ["team_name", "team_logo", "gamertag_or_psn", "platform"]
+    },
+    "draft_gm": {
+      "label": "Draft GM",
+      "fields": ["team_name", "team_logo", "gamertag_or_psn", "platform"]
+    },
+    "draft_player": {
+      "label": "Draft Player",
+      "fields": ["gamertag_or_psn", "platform", "position", "availability"]
+    }
+  },
+  "registrations": [
+    {
+      "registration_id": "",
+      "role": "draft_player",
+      "status": "submitted",
+      "owner_id": "123456789012345678",
+      "owner_tag": "Discord display name",
+      "team_name": "",
+      "people": [
+        {
+          "discord_id": "123456789012345678",
+          "display_name": "Player name",
+          "gamertag_or_psn": "",
+          "platform": "",
+          "position": "",
+          "availability": "",
+          "social_proof": [],
+          "proof_platforms": []
+        }
+      ],
+      "socials_required": ["Instagram", "TikTok", "YouTube", "X/Twitter"],
+      "admin_note": ""
+    }
+  ]
+}

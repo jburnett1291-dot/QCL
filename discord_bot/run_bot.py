@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crash-protected launcher for the unified QCL + Federal Reserve bot."""
+"""Crash-protected launcher for the QCL / URG bot."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ LAST_GOOD = os.path.join(HERE, "QCL2K.last_good.py")
 def compile_ok(path: str) -> tuple[bool, str]:
     try:
         py_compile.compile(path, doraise=True)
-        py_compile.compile(os.path.join(HERE, "FEDERAL_RESERVE_BOT.py"), doraise=True)
         py_compile.compile(os.path.join(HERE, "prefix_gateway.py"), doraise=True)
+        py_compile.compile(os.path.join(HERE, "qcl_admin.py"), doraise=True)
         py_compile.compile(LAUNCHER, doraise=True)
         return True, ""
     except Exception as exc:
@@ -38,7 +38,7 @@ def select_source() -> tuple[str | None, str | None]:
 
 
 def main() -> None:
-    print("Unified QCL + Federal Reserve supervisor")
+    print("QCL / URG supervisor")
     crashes: list[float] = []
     while True:
         target, warning = select_source()

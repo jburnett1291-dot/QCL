@@ -1,0 +1,32 @@
+{
+  "template_version": 1,
+  "registration": {
+    "socials_required": ["Instagram", "TikTok", "YouTube", "X/Twitter"],
+    "form_schemas": {
+      "byot_gm": {
+        "label": "BYOT GM",
+        "fields": ["team_name", "team_logo", "gamertag_or_psn", "platform"]
+      },
+      "draft_gm": {
+        "label": "Draft GM",
+        "fields": ["team_name", "team_logo", "gamertag_or_psn", "platform"]
+      },
+      "draft_player": {
+        "label": "Draft Player",
+        "fields": ["gamertag_or_psn", "platform", "position", "availability"]
+      }
+    }
+  },
+  "season": {
+    "default_days": 14,
+    "reveal_hour": 9,
+    "window_hours": 36
+  },
+  "github": {
+    "repo": "jburnett1291-dot/QCL",
+    "branch": "prefix-only-discord-bot"
+  },
+  "admin": {
+    "audit_log_limit": 100
+  }
+}
