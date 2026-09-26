@@ -101,6 +101,8 @@ import streamlit.components.v1 as components
 #        DISCORD_CLIENT_SECRET = "..."
 #        DISCORD_REDIRECT_URI = "https://your-hub.streamlit.app"
 #        QCL_SIGNING_SECRET = "a-unique-random-secret-of-at-least-32-characters"
+#        QCL_SAVE_API_URL = "https://your-api-host"
+#        QCL_SAVE_API_SECRET = "the API Server's shared-save secret"
 #
 #  The league pages remain public without Discord setup. Cookie persistence
 #  is optional; the old manager is incompatible with current Streamlit.
@@ -3411,10 +3413,11 @@ def _base():
     return _ASSET_BASE if "_ASSET_BASE" in globals() else "."
 
 
-# odds must mirror the bot's TVT_ODDS; edit if yours differ
-_SITE_ODDS = [("Legendary", 0.03), ("Epic", 0.10), ("Rare", 0.22),
-              ("Uncommon", 0.30), ("Common", 0.35)]
-_PACK_SIZE = 5
+# Keep these in sync with the Discord QTCG pack rules.
+_SITE_ODDS = [("Common", 0.50), ("Uncommon", 0.30), ("Rare", 0.15),
+              ("Epic", 0.04), ("Legendary", 0.01)]
+_PACK_SIZE = 3
+_PACK_COST = 100
 _TIER_CLASS = {"Legendary": "legendary", "Epic": "epic", "Rare": "rare",
                "Uncommon": "uncommon", "Common": "common"}
 
@@ -3455,34 +3458,93 @@ def _draw(names, rarity):
     return out
 
 
-def _mint_to_save(user_id, pulled):
-    """Write into the SAME save file the bot uses, so it's one collection."""
-    p = os.path.join(_base(), "fantasy_save.json")
-    save = {}
-    if os.path.exists(p):
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                save = json.load(f) or {}
-        except Exception:
-            save = {}
-    users = save.setdefault("users", {})
-    u = users.setdefault(str(user_id), {"cards": [], "coins": 0})
-    u.setdefault("cards", []).extend(c["name"] for c in pulled)
-    mint = save.setdefault("mint", {})
-    for c in pulled:
-        mint[c["name"]] = int(mint.get(c["name"], 0)) + 1
+def _shared_save_api(method, path, payload=None):
+    """Call the shared API; never write a second, disconnected local save."""
+    base = str(_cfg("QCL_SAVE_API_URL", "")).strip().rstrip("/")
+    if not base:
+        raise RuntimeError("The shared QTCG save API URL is not configured.")
+    api_path = path if base.endswith("/api") else f"/api{path}"
+    headers = {"Accept": "application/json"}
+    if method.upper() != "GET":
+        secret = str(_cfg("QCL_SAVE_API_SECRET", "")).strip()
+        if not secret:
+            raise RuntimeError("The shared QTCG save API secret is not configured.")
+        headers["Authorization"] = f"Bearer {secret}"
+    response = requests.request(
+        method.upper(),
+        f"{base}{api_path}",
+        params=payload if method.upper() == "GET" else None,
+        json=payload if method.upper() != "GET" else None,
+        headers=headers,
+        timeout=15,
+    )
+    if response.status_code == 409:
+        raise RuntimeError(
+            "Your QTCG save changed in another session. Refresh the page and retry."
+        )
     try:
-        tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(save, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, p)
-    except Exception as e:
-        st.warning(f"Couldn't save collection: {e}")
+        response.raise_for_status()
+        result = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        detail = ""
+        try:
+            detail = response.json().get("message") or response.json().get("error") or ""
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Shared QTCG save request failed{': ' + str(detail) if detail else '.'}"
+        ) from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("The shared QTCG save API returned an invalid response.")
+    return result
+
+
+def _shared_user_snapshot(user):
+    user_id = str(user.get("id", "")).strip()
+    if not user_id.isdigit():
+        raise RuntimeError("Your Discord account ID is unavailable.")
+    result = _shared_save_api("GET", "/qtcg/save", {"userId": user_id})
+    if result.get("user") is None:
+        name = str(user.get("name") or user.get("username") or "QCL player")[:100]
+        initial_user = {
+            "name": name,
+            "coins": 500,
+            "cards": [],
+            "roster": {"G": None, "F": None, "C": None, "B1": None, "B2": None},
+            "serials": {},
+            "history": [],
+            "daily_claim": "",
+        }
+        result = _shared_save_api(
+            "POST",
+            "/qtcg/save/migrate",
+            {"userId": user_id, "user": initial_user, "mint": {}},
+        )
+    if not isinstance(result.get("user"), dict):
+        raise RuntimeError("The shared QTCG API returned an invalid user save.")
+    return result
+
+
+def _update_shared_user(user_id, snapshot, user, mint_delta):
+    return _shared_save_api(
+        "PUT",
+        "/qtcg/save/user",
+        {
+            "userId": str(user_id),
+            "user": user,
+            "expectedRevision": snapshot.get("userRevision"),
+            "mintDelta": mint_delta,
+        },
+    )
 
 def render_open_pack(user):
     st.subheader("🎁 Open a Pack")
     if not user:
         st.info("Log in with Discord to open packs — they mint to your collection.")
+        return
+
+    if not _cfg("QCL_SAVE_API_URL"):
+        st.info("Configure QCL_SAVE_API_URL to connect the shared QTCG collection.")
         return
 
     names, rarity = _load_pool()
@@ -3491,13 +3553,76 @@ def render_open_pack(user):
                 "next cycle, then packs open here.")
         return
 
-    # Trigger pack draw & minting on button click
+    try:
+        snapshot = _shared_user_snapshot(user)
+    except Exception as exc:
+        st.error(f"Could not load the shared QTCG save: {exc}")
+        return
+    shared_user = snapshot["user"]
+    coins = int(shared_user.get("coins", 0))
+    st.metric("QTCG coins", coins)
+    owned = shared_user.get("cards", [])
+    if owned:
+        counts = {}
+        for card_name in owned:
+            counts[card_name] = counts.get(card_name, 0) + 1
+        rarity_order = ["Common", "Uncommon", "Rare", "Epic", "Legendary"]
+        collection_rows = []
+        for name, count in sorted(
+            counts.items(),
+            key=lambda item: (
+                -rarity_order.index(rarity.get(item[0], "Common"))
+                if rarity.get(item[0], "Common") in rarity_order else 0,
+                item[0].casefold(),
+            ),
+        ):
+            collection_rows.append({
+                "Player": name,
+                "Rarity": rarity.get(name, "Common"),
+                "Copies": count,
+            })
+        st.caption(f"Shared collection · {len(owned)} cards · {len(counts)} unique")
+        st.dataframe(collection_rows, hide_index=True, use_container_width=True)
+    else:
+        st.caption("Your shared collection is empty.")
+
+    # Charge and save through the same API that the Discord bot uses.
+    st.caption(f"Pack: {_PACK_SIZE} cards · {_PACK_COST} coins")
     col1, col2 = st.columns([2, 2])
     with col1:
         if st.button("🃏 Draw & Rip a Pack", type="primary", use_container_width=True):
+            if coins < _PACK_COST:
+                st.error(f"A pack costs {_PACK_COST} coins; your balance is {coins}.")
+                return
             pulled = _draw(names, rarity)
-            _mint_to_save(user["id"], pulled)
+            updated_user = dict(shared_user)
+            updated_user["coins"] = coins - _PACK_COST
+            updated_user["cards"] = list(shared_user.get("cards", [])) + [
+                card["name"] for card in pulled
+            ]
+            updated_user["serials"] = dict(shared_user.get("serials", {}))
+            updated_user["history"] = list(shared_user.get("history", []))
+            updated_user["history"].append({
+                "at": int(time.time()),
+                "action": "pack",
+                "cards": [card["name"] for card in pulled],
+                "cost": _PACK_COST,
+                "source": "streamlit",
+            })
+            updated_user["history"] = updated_user["history"][-2000:]
+            mint_delta = {}
+            for card in pulled:
+                name = card["name"]
+                mint_delta[name] = mint_delta.get(name, 0) + 1
+            try:
+                saved = _update_shared_user(
+                    user["id"], snapshot, updated_user, mint_delta
+                )
+            except Exception as exc:
+                st.error(f"Pack was not charged or saved: {exc}")
+                return
             st.session_state["last_site_pull"] = pulled
+            st.session_state["last_site_balance"] = saved["user"]["coins"]
             st.rerun()
 
     pulled = st.session_state.get("last_site_pull")
@@ -3626,7 +3751,10 @@ def render_open_pack(user):
     """.replace("__CARDS__", cards_js)
     
     components.html(pack_html, height=400)
-    st.caption("Minted to your collection — same one your Discord cards live in.")
+    st.caption(
+        f"Charged {_PACK_COST} coins. The cards and balance are saved to the "
+        "same collection used by Discord."
+    )
 
 
 
