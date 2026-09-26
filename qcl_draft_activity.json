@@ -1,67 +1,37 @@
 {
-  "revision": 1,
-  "source": {
-    "repository": "jburnett1291-dot/SPAM_HUB",
-    "producer": "QCL2K Discord bot",
-    "updated_at": "2026-09-07 14:50"
-  },
-  "season": 0,
+  "coaches": {},
+  "current_pick": 0,
   "draft_name": "QCL Season 0 Draft",
+  "order": [],
+  "picks": [],
+  "picks_per_team": 6,
+  "players": {
+    "qwik-tv": {
+      "archetype": "2 Way",
+      "build": "2 Way",
+      "combine_games": [],
+      "drafted_by": null,
+      "eligible": true,
+      "gamertag": "Qwik TV",
+      "position": "PG",
+      "primary_position": "PG"
+    }
+  },
+  "revision": 2,
+  "season": 0,
+  "source": {
+    "producer": "QCL2K Discord bot",
+    "repository": "jburnett1291-dot/QCL",
+    "updated_at": "2026-09-26T03:08:47.301935Z"
+  },
+  "staff": {},
   "status": "closed",
-  "war_room_open": true,
+  "team_meta": {},
   "teams": [
     "Team A",
     "Team B",
     "Team C",
     "Team D"
   ],
-  "team_meta": {},
-  "coaches": {
-    "Team A": 1337614287920959609
-  },
-  "staff": {},
-  "players": {
-    "1337614287920959609": {
-      "discord_id": 1337614287920959609,
-      "guild_id": 1523019786877927595,
-      "discord_username": "qwiktv",
-      "gamertag": "Qwik TV",
-      "discord_name": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
-      "build": "2 Way",
-      "position": "PG",
-      "availability": "All",
-      "availability_label": "Weekdays",
-      "socials": {
-        "x_twitter": "QwikTelevision",
-        "xbox_psn": "QwikTelevision",
-        "tiktok": "QwikTV",
-        "youtube": "Qwik"
-      },
-      "registered_at": "2026-09-03 11:22",
-      "updated_at": "2026-09-07 12:17",
-      "drafted_by": null,
-      "combine_games": [],
-      "data_folder": "Draft Players\\1337614287920959609",
-      "photo_path": "Draft Players\\1337614287920959609\\player_photo.png",
-      "photo_filename": "Untitled_design.png",
-      "eligible": true,
-      "primary_position": "PG",
-      "archetype": "2 Way",
-      "registration_requirement": "follow",
-      "proof_of_following": [
-        "https://cdn.discordapp.com/attachments/1515465264487993539/1546570062289182810/Logo_2.png?ex=6aa0431c&is=6a9ef19c&hm=77d1a9d7ac349dff55369f86ee133255bb36ede28d839b42f9b30b86557c1399&",
-        "https://cdn.discordapp.com/attachments/1515465264487993539/1546570062691958874/Logo_3.png?ex=6aa0431c&is=6a9ef19c&hm=791787b53c5996c4462e69556c93d8efa7691810810f30f56424842cd8890c2e&"
-      ],
-      "entry_fee_proof": [],
-      "proof_message_url": "https://discord.com/channels/@me/1515465264487993539/1546570063015051454",
-      "statuses": [
-        "free agent",
-        "pending review"
-      ]
-    }
-  },
-  "picks": [],
-  "order": [],
-  "current_pick": 0,
-  "picks_per_team": 6
+  "war_room_open": true
 }
