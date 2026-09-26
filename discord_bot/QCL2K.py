@@ -52,6 +52,12 @@ def load_quest_vault():
 #   ANTHROPIC_API_KEY=your_claude_api_key
 #   ADMIN_PIN=1991
 #   ALLOWED_GUILD_IDS=123456789012345678
+#   GITHUB_TOKEN=your_github_token
+#   DRAFT_GITHUB_REPO=jburnett1291-dot/QCL
+#   DRAFT_GITHUB_BRANCH=main
+#   DRAFT_PATH=qcl_draft_activity.json
+#   DRAFT_GITHUB_ASSET_ROOT=draft_players
+#   DRAFT_SYNC_SECONDS=5
 #
 # (SHEET_ID and APPS_SCRIPT_URL are hardcoded below — change them HERE, not in .env)
 #
@@ -33062,6 +33068,22 @@ async def season_admin_status(interaction: discord.Interaction):
         f"Recovery archives retained: **{len(archives)}**",
         ephemeral=True,
     )
+
+
+# ── Extensions for the real QCL bot ────────────────────────────────────────
+# Kept in small sibling modules so the legacy bot can still start if an
+# optional presentation dependency is unavailable.
+try:
+    from qcl_league_galaxy import install_galaxy as _install_qcl_galaxy
+    _install_qcl_galaxy(bot, globals())
+except Exception as _galaxy_install_error:
+    print(f"[Galaxy] Extension could not load: {type(_galaxy_install_error).__name__}")
+
+try:
+    from qcl_draft_github_sync import install_draft_sync as _install_draft_github_sync
+    _install_draft_github_sync(bot, globals())
+except Exception as _draft_sync_install_error:
+    print(f"[DraftSync] Extension could not load: {type(_draft_sync_install_error).__name__}")
 
 
 # --- START THE BOT ---
