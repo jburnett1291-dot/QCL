@@ -1,10 +1,22 @@
 {
   "qcl_registrations": {
+    "42397184aa62da78d06de03b": {
+      "registration_id": "42397184aa62da78d06de03b",
+      "role": "byot_gm",
+      "status": "approved",
+      "team_name": "ads"
+    },
     "cc41a1c62e6f0f8825e174bb": {
       "registration_id": "cc41a1c62e6f0f8825e174bb",
       "role": "byot_gm",
       "status": "approved",
       "team_name": "ads"
+    },
+    "d103fb42c650f8e8f24baabe": {
+      "registration_id": "d103fb42c650f8e8f24baabe",
+      "role": "byot_gm",
+      "status": "approved",
+      "team_name": "kdsfkasdjfkjfls"
     },
     "d15f786d310157bff55277fd": {
       "registration_id": "d15f786d310157bff55277fd",
