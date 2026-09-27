@@ -121,6 +121,8 @@ _AUTH = "https://discord.com/api/oauth2/authorize"
 _TOKEN = "https://discord.com/api/oauth2/token"
 _ME = "https://discord.com/api/users/@me"
 _TOKEN_TTL = 60 * 60 * 24 * 30      # 30 days
+_cookies = None
+_cookie_manager_initialized = False
 
 
 def _cfg(key, default=""):
@@ -169,20 +171,31 @@ def _login_cookies():
     return stx.CookieManager(key="qcl_session_cookie_manager")
 
 
+def _ensure_login_cookies():
+    """Initialize the browser component lazily, after OAuth callback cleanup."""
+    global _cookies, _cookie_manager_initialized
+    if not _cookie_manager_initialized:
+        _cookies = _login_cookies()
+        _cookie_manager_initialized = True
+    return _cookies
+
+
 def _cookie_get(name):
-    if _cookies is None:
+    cookies = _ensure_login_cookies()
+    if cookies is None:
         return None
     try:
-        return _cookies.get(name)
+        return cookies.get(name)
     except Exception:
         return None
 
 
 def _cookie_set(name, value):
-    if _cookies is None:
+    cookies = _ensure_login_cookies()
+    if cookies is None:
         return False
     try:
-        _cookies.set(
+        cookies.set(
             name,
             value,
             expires_at=datetime.now() + timedelta(seconds=_TOKEN_TTL),
@@ -194,10 +207,11 @@ def _cookie_set(name, value):
 
 
 def _cookie_delete(name):
-    if _cookies is None:
+    cookies = _ensure_login_cookies()
+    if cookies is None:
         return
     try:
-        _cookies.delete(name, key=f"delete_{name}_{int(time.time())}")
+        cookies.delete(name, key=f"delete_{name}_{int(time.time())}")
     except Exception:
         pass
 
@@ -252,6 +266,10 @@ def restore_session():
     # CookieManager is a browser component: a successful set call alone does
     # not prove the browser stored it. Keep the signed URL fallback until readback.
     pending_cookie = st.session_state.get("_qcl_cookie_probe")
+    # On an OAuth callback, process the fresh one-time code before any browser
+    # cookie round-trip can trigger a Streamlit rerun.
+    if params.get("code"):
+        pending_cookie = None
     if pending_cookie:
         if _cookie_get("qcl") == pending_cookie:
             st.session_state.pop("_qcl_cookie_probe", None)
@@ -820,7 +838,6 @@ def _render_registration():
 
 
 # Discord linking is optional for browsing the public league pages.
-_cookies = _login_cookies()
 restore_session()
 _viewer = current_user()
 _viewer_access = _access(_viewer)
