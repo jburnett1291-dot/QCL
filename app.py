@@ -227,13 +227,19 @@ def _exchange_code(code):
         
         # --- NEW DEBUG CODE ---
         if r.status_code != 200:
-            st.error(f"🚨 Discord rejected the trade: {r.text}")
+            st.error(f"Discord OAuth code exchange failed (HTTP {r.status_code}): {r.text}")
             return None
         # ----------------------
         
         tok = r.json().get("access_token")
+        if not tok:
+            st.error("Discord returned a successful token response without an access token.")
+            return None
         me = requests.get(_ME, headers={"Authorization": f"Bearer {tok}"}, timeout=8)
-        return me.json() if me.status_code == 200 else None
+        if me.status_code != 200:
+            st.error(f"Discord profile lookup failed (HTTP {me.status_code}): {me.text[:300]}")
+            return None
+        return me.json()
     except Exception as e:
         st.error(f"🚨 Network Crash: {e}")
         return None
@@ -250,6 +256,7 @@ def restore_session():
         if _cookie_get("qcl") == pending_cookie:
             st.session_state.pop("_qcl_cookie_probe", None)
             st.session_state.pop("_qcl_cookie_fallback", None)
+            st.session_state.pop("_qcl_cookie_write_attempted", None)
             _clear_qcl_query_param()
         else:
             st.session_state.pop("_qcl_cookie_probe", None)
@@ -286,18 +293,25 @@ def restore_session():
             # browser blocks the component's cookie, refreshes still restore login.
             token = _sign({"id": u["id"], "name": u["global_name"],
                            "avatar": u["avatar"], "exp": time.time() + _TOKEN_TTL})
-            cookie_write_started = _cookie_set("qcl", token)
+            # Put a valid fallback in place and consume the callback code before
+            # invoking CookieManager; its browser round-trip can cause a rerun.
             st.query_params["qcl"] = token
-            if cookie_write_started:
-                st.session_state["_qcl_cookie_probe"] = token
-            else:
+            st.session_state["_qcl_cookie_write_attempted"] = token
+            st.session_state["_qcl_cookie_probe"] = token
+            st.session_state.pop("_qcl_cookie_fallback", None)
+            _remove_query_param("code")
+            cookie_write_started = _cookie_set("qcl", token)
+            if not cookie_write_started:
                 st.session_state.pop("_qcl_cookie_probe", None)
                 st.session_state["_qcl_cookie_fallback"] = True
-            _remove_query_param("code")
             _rerun()
         else:
             _remove_query_param("code")
-            st.error("🚨 Discord Login Failed! Check that your Client ID, Client Secret, and Redirect URI match perfectly in Streamlit Cloud Secrets.")
+            st.error(
+                "Discord rejected the one-time login code. Start a fresh login. "
+                "If it repeats, check that the OAuth redirect URI in Streamlit "
+                "Secrets exactly matches the Discord app's registered redirect URI."
+            )
             st.stop()
         return
 
@@ -316,12 +330,20 @@ def restore_session():
             if params.get("qcl"):
                 if cookie_tok == tok:
                     st.session_state.pop("_qcl_cookie_fallback", None)
+                    st.session_state.pop("_qcl_cookie_probe", None)
+                    st.session_state.pop("_qcl_cookie_write_attempted", None)
                     _clear_qcl_query_param()
-                elif _cookie_set("qcl", tok):
-                    # Do not remove ?qcl until a later run confirms the cookie.
-                    st.session_state["_qcl_cookie_probe"] = tok
-                else:
+                elif st.session_state.get("_qcl_cookie_write_attempted") == tok:
+                    # The browser write is already in progress or was attempted.
                     st.session_state["_qcl_cookie_fallback"] = True
+                else:
+                    # Mark before calling the component so a rerun won't issue
+                    # a second write (or re-exchange the one-time OAuth code).
+                    st.session_state["_qcl_cookie_write_attempted"] = tok
+                    st.session_state["_qcl_cookie_probe"] = tok
+                    if not _cookie_set("qcl", tok):
+                        st.session_state.pop("_qcl_cookie_probe", None)
+                        st.session_state["_qcl_cookie_fallback"] = True
 
 
 def current_user():
@@ -356,6 +378,7 @@ def login_widget(key="sidebar"):
             st.session_state.pop("auth_expires_at", None)
             st.session_state.pop("_qcl_cookie_probe", None)
             st.session_state.pop("_qcl_cookie_fallback", None)
+            st.session_state.pop("_qcl_cookie_write_attempted", None)
             if _cookie_get("qcl"):
                 _cookie_delete("qcl")
             st.query_params.clear()
