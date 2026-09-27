@@ -100,8 +100,9 @@ import streamlit.components.v1 as components
 #        DISCORD_CLIENT_SECRET = "..."
 #        DISCORD_REDIRECT_URI = "https://your-hub.streamlit.app"
 #        QCL_SIGNING_SECRET = "a-unique-random-secret-of-at-least-32-characters"
-#        QCL_SAVE_API_URL = "https://your-api-host"
-#        QCL_SAVE_API_SECRET = "the API Server's shared-save secret"
+#        QCL_SAVE_API_URL = "https://diligent-eagerness-test-9422.up.railway.app"
+#     QCL_SIGNING_SECRET must match the value configured on the QTCG Railway service.
+#     QCL_SAVE_API_SECRET is not used by the current QTCG API.
 #
 #  The league pages remain public without Discord setup. Cookie persistence
 #  is optional; the old manager is incompatible with current Streamlit.
@@ -684,6 +685,261 @@ def _submit_streamlit_registration(payload, uploads):
     )
     if response.status_code not in (200, 204):
         raise RuntimeError(f"Discord intake returned HTTP {response.status_code}.")
+
+
+_QTCG_API_DEFAULT = "https://diligent-eagerness-test-9422.up.railway.app"
+
+
+def _qtcg_api_base():
+    """Return the Railway API origin; allow an explicit Streamlit override."""
+    base = str(_cfg("QCL_SAVE_API_URL", _QTCG_API_DEFAULT) or _QTCG_API_DEFAULT)
+    base = base.strip().rstrip("/")
+    if base.endswith("/api"):
+        base = base[:-4].rstrip("/")
+    if not base.startswith("https://"):
+        raise RuntimeError("QCL_SAVE_API_URL must be an HTTPS URL.")
+    return base
+
+
+def _qtcg_session_token(user):
+    """Create the same short-lived HMAC session accepted by the QTCG API."""
+    uid = str((user or {}).get("id", "")).strip()
+    if not uid.isdigit():
+        raise RuntimeError("Your Discord account ID is unavailable.")
+    secret = str(_cfg("QCL_SIGNING_SECRET", "")).strip()
+    if len(secret) < 32:
+        raise RuntimeError("QCL_SIGNING_SECRET must be configured with at least 32 characters.")
+    payload = {
+        "id": uid,
+        "name": str(user.get("global_name") or user.get("username") or "QCL player")[:100],
+        "avatar": user.get("avatar"),
+        "exp": time.time() + 6 * 60 * 60,
+    }
+    body = base64.urlsafe_b64encode(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).hexdigest()[:16]
+    return f"{body}.{signature}"
+
+
+def _qtcg_api_request(method, path, user, payload=None):
+    """Call the live QTCG API server-side; never expose its signed session to JS."""
+    method = method.upper()
+    if method not in {"GET", "POST"} or not path.startswith("/"):
+        raise ValueError("Unsupported QTCG API request.")
+    base = _qtcg_api_base()
+    token = _qtcg_session_token(user)
+    url = f"{base}/api{path}"
+    data = dict(payload or {})
+    if method == "GET":
+        data["session"] = token
+        response = requests.get(url, params=data, headers={"Accept": "application/json"}, timeout=15)
+    else:
+        data["session"] = token
+        response = requests.post(
+            url, json=data, headers={"Accept": "application/json"}, timeout=20
+        )
+    try:
+        result = response.json()
+    except ValueError:
+        result = {}
+    if response.status_code == 401:
+        raise RuntimeError(
+            "QTCG rejected the Hub session. QCL_SIGNING_SECRET must match the value "
+            "configured on the QTCG Railway service."
+        )
+    if not response.ok:
+        detail = result.get("error") if isinstance(result, dict) else ""
+        raise RuntimeError(
+            f"QTCG API returned HTTP {response.status_code}"
+            f"{': ' + str(detail)[:220] if detail else '.'}"
+        )
+    if not isinstance(result, dict):
+        raise RuntimeError("The QTCG API returned an invalid response.")
+    return result
+
+
+def _qtcg_image_url(api_base, image):
+    if not isinstance(image, str) or not image.strip():
+        return ""
+    try:
+        url = urllib.parse.urljoin(api_base.rstrip("/") + "/", image.strip())
+        if urllib.parse.urlparse(url).scheme != "https":
+            return ""
+        return url
+    except Exception:
+        return ""
+
+
+def _qtcg_stat(value):
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return _html.escape(str(value)[:16])
+
+
+def _qtcg_binder_card_html(card, api_base):
+    name = _html.escape(str(card.get("name") or "Unknown player"))
+    tier = str(card.get("tier") or "Common")
+    tier_label = _html.escape(tier[:24])
+    tier_class = re.sub(r"[^a-z]+", "-", tier.casefold()).strip("-") or "common"
+    try:
+        copies = max(1, int(card.get("count", 1)))
+    except (TypeError, ValueError):
+        copies = 1
+    stats = card.get("stats") if isinstance(card.get("stats"), dict) else {}
+    image = _qtcg_image_url(api_base, card.get("img"))
+    if image:
+        art = (
+            f"<img class='qtcg-art' src='{_html.escape(image, quote=True)}' "
+            f"alt='{name}' loading='lazy'>"
+        )
+    else:
+        art = f"<div class='qtcg-art qtcg-art-empty'><span>{name}</span></div>"
+    stat_items = "".join(
+        f"<div class='qtcg-stat'><span>{label}</span><b>{_qtcg_stat(stats.get(key))}</b></div>"
+        for label, key in (
+            ("PPG", "ppg"), ("RPG", "rpg"), ("APG", "apg"),
+            ("SPG", "spg"), ("BPG", "bpg"), ("FP", "fp"), ("GP", "gp"),
+        )
+    )
+    return (
+        f"<article class='qtcg-card tier-{tier_class}' role='button' tabindex='0' "
+        f"aria-label='Flip {name} card'><div class='qtcg-inner'>"
+        f"<div class='qtcg-face qtcg-front'>"
+        f"<div class='qtcg-card-top'><span class='qtcg-tier'>{tier_label}</span>"
+        f"<span class='qtcg-copies'>{copies}×</span></div>{art}"
+        f"<div class='qtcg-name'>{name}</div>"
+        f"<div class='qtcg-tap'>TAP TO REVEAL STATS</div></div>"
+        f"<div class='qtcg-face qtcg-back'>"
+        f"<div class='qtcg-back-head'><span>{tier_label}</span><b>{name}</b></div>"
+        f"<div class='qtcg-stats'>{stat_items}</div>"
+        f"<div class='qtcg-copy-note'>{copies} owned</div></div>"
+        f"</div></article>"
+    )
+
+
+def render_qtcg_binder(user):
+    st.title("🗂 My QTCG Binder")
+    st.caption("Your shared Discord collection. Tap or click any card to flip it for player stats.")
+    if not user:
+        st.info("Log in with Discord to view the binder linked to your account.")
+        login_widget(key="qtcg_binder")
+        return
+    try:
+        api_base = _qtcg_api_base()
+        result = _qtcg_api_request("POST", "/binder", user)
+        cards = result.get("cards", [])
+        if not isinstance(cards, list):
+            raise RuntimeError("The QTCG API returned an invalid binder.")
+    except Exception as exc:
+        st.error(f"Could not load your shared QTCG binder: {exc}")
+        return
+
+    def _copies(card):
+        try:
+            return max(1, int(card.get("count", 1)))
+        except (AttributeError, TypeError, ValueError):
+            return 1
+
+    total = sum(_copies(card) for card in cards if isinstance(card, dict))
+    legendary = sum(
+        _copies(card) for card in cards
+        if isinstance(card, dict) and str(card.get("tier", "")).casefold() == "legendary"
+    )
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Cards owned", total)
+    m2.metric("Unique cards", len(cards))
+    m3.metric("Legendary copies", legendary)
+    if not cards:
+        st.info("Your shared QTCG binder is empty.")
+        if st.button("🎁 Open Packs", key="binder_open_packs"):
+            st.session_state["qcl_nav"] = "🎁 Open Packs"
+            _rerun()
+        return
+
+    tiers = ["All tiers", "Legendary", "Epic", "Rare", "Uncommon", "Common"]
+    selected_tier = st.selectbox("Filter binder", tiers, key="qtcg_binder_filter")
+    visible = [
+        card for card in cards if isinstance(card, dict)
+        and (selected_tier == "All tiers"
+             or str(card.get("tier", "Common")).casefold() == selected_tier.casefold())
+    ]
+    st.caption(f"Showing {len(visible)} unique cards · animated flip reveals stats and copies.")
+    if not visible:
+        st.info("There are no cards at that rarity yet.")
+        return
+
+    card_html = "".join(_qtcg_binder_card_html(card, api_base) for card in visible)
+    binder_html = """
+    <!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+      *{box-sizing:border-box}
+      body{margin:0;padding:10px;background:transparent;color:#f5f7ff;
+        font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+      .qtcg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:16px}
+      .qtcg-card{height:340px;perspective:1200px;cursor:pointer;outline:none}
+      .qtcg-inner{position:relative;width:100%;height:100%;transform-style:preserve-3d;
+        transition:transform .72s cubic-bezier(.2,.75,.2,1)}
+      .qtcg-card.is-flipped .qtcg-inner{transform:rotateY(180deg)}
+      .qtcg-card:focus-visible .qtcg-face{outline:3px solid #94a3ff;outline-offset:3px}
+      .qtcg-face{position:absolute;inset:0;overflow:hidden;border-radius:17px;
+        backface-visibility:hidden;border:1px solid rgba(255,255,255,.16);
+        box-shadow:0 12px 30px rgba(0,0,0,.36)}
+      .qtcg-front{display:flex;flex-direction:column;padding:11px;
+        background:linear-gradient(150deg,#202632,#11151d 74%)}
+      .qtcg-card-top{display:flex;justify-content:space-between;align-items:center;
+        margin-bottom:9px;min-height:25px}
+      .qtcg-tier{font-size:10px;font-weight:900;letter-spacing:1.2px;text-transform:uppercase;
+        padding:5px 8px;border-radius:999px;background:rgba(255,255,255,.11)}
+      .qtcg-copies{font-size:11px;font-weight:900;color:#d5dcff}
+      .qtcg-art{display:block;width:100%;height:235px;object-fit:cover;border-radius:11px;
+        background:linear-gradient(140deg,#293246,#131721)}
+      .qtcg-art-empty{display:flex;align-items:center;justify-content:center;padding:15px;
+        color:#d8defa;font-size:19px;font-weight:900;text-align:center}
+      .qtcg-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;
+        font-size:15px;font-weight:900;margin:9px 0 4px}
+      .qtcg-tap{text-align:center;color:#98a3b8;font-size:9px;letter-spacing:1px}
+      .qtcg-back{transform:rotateY(180deg);padding:18px 15px;display:flex;flex-direction:column;
+        background:radial-gradient(circle at 50% 0,rgba(99,102,241,.34),transparent 48%),
+          linear-gradient(155deg,#202735,#11151d)}
+      .qtcg-back-head{display:flex;flex-direction:column;gap:8px;padding-bottom:13px;
+        border-bottom:1px solid rgba(255,255,255,.13)}
+      .qtcg-back-head span{font-size:10px;font-weight:900;letter-spacing:1.3px;
+        color:#aebaff;text-transform:uppercase}
+      .qtcg-back-head b{font-size:18px;line-height:1.2}
+      .qtcg-stats{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:18px}
+      .qtcg-stat{border-radius:10px;padding:10px;background:rgba(255,255,255,.055);
+        display:flex;align-items:center;justify-content:space-between}
+      .qtcg-stat span{font-size:10px;color:#a6afc1;font-weight:800;letter-spacing:.8px}
+      .qtcg-stat b{font-size:16px;color:#fff}
+      .qtcg-copy-note{margin-top:auto;text-align:center;color:#aebaff;font-size:11px;font-weight:800}
+      .tier-legendary .qtcg-front{border-color:#f5bd4f;box-shadow:0 0 24px rgba(245,189,79,.26)}
+      .tier-epic .qtcg-front{border-color:#b68cff}
+      .tier-rare .qtcg-front{border-color:#65a8ff}
+      .tier-uncommon .qtcg-front{border-color:#5cda9a}
+      @media(max-width:430px){.qtcg-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+        .qtcg-card{height:310px}.qtcg-art{height:205px}}
+      @media(prefers-reduced-motion:reduce){.qtcg-inner{transition-duration:.01ms}}
+    </style></head><body><main class="qtcg-grid">__CARDS__</main>
+    <script>
+      document.querySelectorAll(".qtcg-card").forEach(card=>{
+        const flip=()=>card.classList.toggle("is-flipped");
+        card.addEventListener("click",flip);
+        card.addEventListener("keydown",event=>{
+          if(event.key==="Enter"||event.key===" "){event.preventDefault();flip();}
+        });
+      });
+    </script></body></html>
+    """.replace("__CARDS__", card_html)
+    height = min(6500, max(440, ((len(visible) + 2) // 3) * 365 + 36))
+    components.html(binder_html, height=height, scrolling=True)
+    if st.button("🎁 Open Packs", key="binder_open_packs_bottom"):
+        st.session_state["qcl_nav"] = "🎁 Open Packs"
+        _rerun()
 
 
 def _render_registration():
@@ -1627,6 +1883,7 @@ VIEWS = [
     "🏦 The Vault",
     "📈 Card Market",
     "🎴 Qwiks TCG",
+    "🗂 My QTCG Binder",
     "👤 My Profile",
     "🎁 Open Packs",
     "🃏 Player Cards",
@@ -1687,6 +1944,9 @@ if view_mode == "📰 News & Updates":
     st.stop()
 if view_mode == "📝 Register":
     _render_registration()
+    st.stop()
+if view_mode == "🗂 My QTCG Binder":
+    render_qtcg_binder(current_user())
     st.stop()
 if view_mode == "Film Terminal":
     from qcl_film import render as render_film_room
@@ -3494,138 +3754,14 @@ def projected_box(rot, pp):
 
 import os
 import json
-import random
 import streamlit as st
 import streamlit.components.v1 as components
 
 
-def _base():
-    return _ASSET_BASE if "_ASSET_BASE" in globals() else "."
-
-
-# Keep these in sync with the Discord QTCG pack rules.
-_SITE_ODDS = [("Common", 0.50), ("Uncommon", 0.30), ("Rare", 0.15),
-              ("Epic", 0.04), ("Legendary", 0.01)]
-_PACK_SIZE = 3
-_PACK_COST = 100
+# Match the rarity labels returned by the shared QTCG API.
 _TIER_CLASS = {"Legendary": "legendary", "Epic": "epic", "Rare": "rare",
                "Uncommon": "uncommon", "Common": "common"}
 
-
-def _load_pool():
-    """Read the same pool the bot publishes (names + rarity)."""
-    for fn in ("fantasy_market.json", "pool.json"):
-        p = os.path.join(_base(), fn)
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                names = data.get("names") or list(data.get("cards", {}).keys())
-                rarity = data.get("rarity", {})
-                if names:
-                    return names, rarity
-            except Exception:
-                pass
-    return [], {}
-
-
-def _draw(names, rarity):
-    buckets = {}
-    for n in names:
-        buckets.setdefault(rarity.get(n, "Common"), []).append(n)
-    out = []
-    for _ in range(_PACK_SIZE):
-        roll, cum, chosen = random.random(), 0.0, "Common"
-        for tier, odds in _SITE_ODDS:
-            cum += odds
-            if roll <= cum:
-                chosen = tier
-                break
-        bucket = buckets.get(chosen) or names
-        if bucket:
-            name = random.choice(bucket)
-            out.append({"name": name, "tier": rarity.get(name, chosen)})
-    return out
-
-
-def _shared_save_api(method, path, payload=None):
-    """Call the shared API; never write a second, disconnected local save."""
-    base = str(_cfg("QCL_SAVE_API_URL", "")).strip().rstrip("/")
-    if not base:
-        raise RuntimeError("The shared QTCG save API URL is not configured.")
-    api_path = path if base.endswith("/api") else f"/api{path}"
-    headers = {"Accept": "application/json"}
-    if method.upper() != "GET":
-        secret = str(_cfg("QCL_SAVE_API_SECRET", "")).strip()
-        if not secret:
-            raise RuntimeError("The shared QTCG save API secret is not configured.")
-        headers["Authorization"] = f"Bearer {secret}"
-    response = requests.request(
-        method.upper(),
-        f"{base}{api_path}",
-        params=payload if method.upper() == "GET" else None,
-        json=payload if method.upper() != "GET" else None,
-        headers=headers,
-        timeout=15,
-    )
-    if response.status_code == 409:
-        raise RuntimeError(
-            "Your QTCG save changed in another session. Refresh the page and retry."
-        )
-    try:
-        response.raise_for_status()
-        result = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        detail = ""
-        try:
-            detail = response.json().get("message") or response.json().get("error") or ""
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"Shared QTCG save request failed{': ' + str(detail) if detail else '.'}"
-        ) from exc
-    if not isinstance(result, dict):
-        raise RuntimeError("The shared QTCG save API returned an invalid response.")
-    return result
-
-
-def _shared_user_snapshot(user):
-    user_id = str(user.get("id", "")).strip()
-    if not user_id.isdigit():
-        raise RuntimeError("Your Discord account ID is unavailable.")
-    result = _shared_save_api("GET", "/qtcg/save", {"userId": user_id})
-    if result.get("user") is None:
-        name = str(user.get("name") or user.get("username") or "QCL player")[:100]
-        initial_user = {
-            "name": name,
-            "coins": 500,
-            "cards": [],
-            "roster": {"G": None, "F": None, "C": None, "B1": None, "B2": None},
-            "serials": {},
-            "history": [],
-            "daily_claim": "",
-        }
-        result = _shared_save_api(
-            "POST",
-            "/qtcg/save/migrate",
-            {"userId": user_id, "user": initial_user, "mint": {}},
-        )
-    if not isinstance(result.get("user"), dict):
-        raise RuntimeError("The shared QTCG API returned an invalid user save.")
-    return result
-
-
-def _update_shared_user(user_id, snapshot, user, mint_delta):
-    return _shared_save_api(
-        "PUT",
-        "/qtcg/save/user",
-        {
-            "userId": str(user_id),
-            "user": user,
-            "expectedRevision": snapshot.get("userRevision"),
-            "mintDelta": mint_delta,
-        },
-    )
 
 def render_open_pack(user):
     st.subheader("🎁 Open a Pack")
@@ -3633,103 +3769,74 @@ def render_open_pack(user):
         st.info("Log in with Discord to open packs — they mint to your collection.")
         return
 
-    if not _cfg("QCL_SAVE_API_URL"):
-        st.info("Configure QCL_SAVE_API_URL to connect the shared QTCG collection.")
-        return
-
-    names, rarity = _load_pool()
-    if not names:
-        st.info("The card pool isn't published yet. The bot publishes it on its "
-                "next cycle, then packs open here.")
-        return
-
     try:
-        snapshot = _shared_user_snapshot(user)
+        balance = _qtcg_api_request("GET", "/balance", user)
+        binder = _qtcg_api_request("POST", "/binder", user)
     except Exception as exc:
-        st.error(f"Could not load the shared QTCG save: {exc}")
+        st.error(f"Could not load the shared QTCG account: {exc}")
         return
-    shared_user = snapshot["user"]
-    coins = int(shared_user.get("coins", 0))
-    st.metric("QTCG coins", coins)
-    owned = shared_user.get("cards", [])
-    if owned:
-        counts = {}
-        for card_name in owned:
-            counts[card_name] = counts.get(card_name, 0) + 1
-        rarity_order = ["Common", "Uncommon", "Rare", "Epic", "Legendary"]
-        collection_rows = []
-        for name, count in sorted(
-            counts.items(),
-            key=lambda item: (
-                -rarity_order.index(rarity.get(item[0], "Common"))
-                if rarity.get(item[0], "Common") in rarity_order else 0,
-                item[0].casefold(),
-            ),
-        ):
-            collection_rows.append({
-                "Player": name,
-                "Rarity": rarity.get(name, "Common"),
-                "Copies": count,
-            })
-        st.caption(f"Shared collection · {len(owned)} cards · {len(counts)} unique")
-        st.dataframe(collection_rows, hide_index=True, use_container_width=True)
-    else:
-        st.caption("Your shared collection is empty.")
+    cards_owned = binder.get("cards", [])
+    try:
+        pack_cost = max(0, int(balance["pack_cost"]))
+    except (KeyError, TypeError, ValueError):
+        st.error("The QTCG API did not return a valid pack cost.")
+        return
+    coins = balance.get("coins", 0)
+    total_owned = sum(
+        max(1, int(card.get("count", 1)))
+        for card in cards_owned if isinstance(card, dict)
+    )
+    col1, col2 = st.columns([1, 1])
+    col1.metric("QTCG coins", coins)
+    col2.metric("Cards in binder", total_owned)
+    st.caption(f"Pack cost: {pack_cost} coins · pulls and charges are handled by the shared QTCG server.")
+    if st.button("🃏 Draw & Rip a Pack", type="primary", use_container_width=True):
+        try:
+            opened = _qtcg_api_request(
+                "POST", "/openpack", user, {"stake": pack_cost}
+            )
+            pulled = opened.get("cards", [])
+            if not isinstance(pulled, list) or not pulled:
+                raise RuntimeError("The QTCG API returned no cards for this pack.")
+            st.session_state["_qtcg_last_site_pull"] = {
+                "user_id": str(user.get("id", "")),
+                "cards": pulled,
+                "charged": opened.get("staked", pack_cost),
+            }
+        except Exception as exc:
+            st.error(f"Pack was not opened: {exc}")
+            return
+        _rerun()
 
-    # Charge and save through the same API that the Discord bot uses.
-    st.caption(f"Pack: {_PACK_SIZE} cards · {_PACK_COST} coins")
-    col1, col2 = st.columns([2, 2])
-    with col1:
-        if st.button("🃏 Draw & Rip a Pack", type="primary", use_container_width=True):
-            if coins < _PACK_COST:
-                st.error(f"A pack costs {_PACK_COST} coins; your balance is {coins}.")
-                return
-            pulled = _draw(names, rarity)
-            updated_user = dict(shared_user)
-            updated_user["coins"] = coins - _PACK_COST
-            updated_user["cards"] = list(shared_user.get("cards", [])) + [
-                card["name"] for card in pulled
-            ]
-            updated_user["serials"] = dict(shared_user.get("serials", {}))
-            updated_user["history"] = list(shared_user.get("history", []))
-            updated_user["history"].append({
-                "at": int(time.time()),
-                "action": "pack",
-                "cards": [card["name"] for card in pulled],
-                "cost": _PACK_COST,
-                "source": "streamlit",
-            })
-            updated_user["history"] = updated_user["history"][-2000:]
-            mint_delta = {}
-            for card in pulled:
-                name = card["name"]
-                mint_delta[name] = mint_delta.get(name, 0) + 1
-            try:
-                saved = _update_shared_user(
-                    user["id"], snapshot, updated_user, mint_delta
-                )
-            except Exception as exc:
-                st.error(f"Pack was not charged or saved: {exc}")
-                return
-            st.session_state["last_site_pull"] = pulled
-            st.session_state["last_site_balance"] = saved["user"]["coins"]
-            st.rerun()
-
-    pulled = st.session_state.get("last_site_pull")
-    if pulled:
-        with col2:
-            if st.button("🔄 Reset Pack View", use_container_width=True):
-                st.session_state.pop("last_site_pull", None)
-                st.rerun()
+    pull_state = st.session_state.get("_qtcg_last_site_pull", {})
+    same_user = (
+        isinstance(pull_state, dict)
+        and pull_state.get("user_id") == str(user.get("id", ""))
+    )
+    pulled = pull_state.get("cards", []) if same_user else []
+    if pulled and st.button("🔄 Reset Pack View", use_container_width=True):
+        st.session_state.pop("_qtcg_last_site_pull", None)
+        _rerun()
 
     if not pulled:
-        st.caption("Click 'Draw & Rip a Pack' above to generate your cards and launch the animation.")
+        st.caption("Tap the pack button to open a server-verified pack.")
         return
 
-    cards_data = [{"n": c["name"], 
-                   "c": _TIER_CLASS.get(c["tier"], "common"), 
-                   "t": c["tier"].upper()} for c in pulled]
-    cards_js = json.dumps(cards_data)
+    cards_data = []
+    for card in pulled:
+        if not isinstance(card, dict):
+            continue
+        tier = str(card.get("tier") or "Common")
+        cards_data.append({
+            "n": str(card.get("name") or "Unknown player"),
+            "c": _TIER_CLASS.get(tier.title(), "common"),
+            "t": tier.upper()[:24],
+        })
+    if not cards_data:
+        st.info("The pack was saved, but its card reveal could not be displayed.")
+        return
+    cards_js = json.dumps(cards_data, ensure_ascii=True, separators=(",", ":"))
+    cards_js = cards_js.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
     pack_html = """
     <!DOCTYPE html>
@@ -3830,7 +3937,9 @@ def render_open_pack(user):
         cards.forEach((card,i)=>{
           const el=document.createElement('div');
           el.className='rc '+card.c;
-          el.innerHTML='<div class="t">'+card.t+'</div><div class="n">'+card.n+'</div>';
+          el.innerHTML='<div class="t"></div><div class="n"></div>';
+          el.querySelector('.t').textContent=card.t;
+          el.querySelector('.n').textContent=card.n;
           wrap.appendChild(el);
           setTimeout(()=>el.classList.add('in'), 150 + i*260);
         });
@@ -3841,9 +3950,10 @@ def render_open_pack(user):
     """.replace("__CARDS__", cards_js)
     
     components.html(pack_html, height=400)
+    charged = pull_state.get("charged", pack_cost) if same_user else pack_cost
     st.caption(
-        f"Charged {_PACK_COST} coins. The cards and balance are saved to the "
-        "same collection used by Discord."
+        f"Charged {charged} coins. The cards and balance are saved to the "
+        "same QTCG collection used by Discord."
     )
 
 
