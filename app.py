@@ -90,9 +90,8 @@ import streamlit.components.v1 as components
 # ═══════════════════════════════════════════════════════════════════════════
 #  OPTIONAL DISCORD LINKING — required only for the GM / Players desks.
 #
-#  A signed 30-day token is kept in an encrypted browser cookie only on
-#  compatible Streamlit versions. Existing ?qcl= signed links still
-#  restore a session, and are used as a fallback without cookie support.
+#  A signed 30-day token is kept in a browser cookie when cookie storage works.
+#  The signed ?qcl= link remains as a fallback until the cookie is confirmed.
 #
 #  Replaces hub_discord_login.py. Same setup (Discord app + secrets), plus one
 #  more secret for signing:
@@ -203,6 +202,14 @@ def _cookie_delete(name):
         pass
 
 
+def _clear_qcl_query_param():
+    """Remove only the login fallback, preserving unrelated query parameters."""
+    try:
+        st.query_params.pop("qcl", None)
+    except Exception:
+        pass
+
+
 def _exchange_code(code):
     data = {"client_id": _cfg("DISCORD_CLIENT_ID"),
             "client_secret": _cfg("DISCORD_CLIENT_SECRET"),
@@ -230,6 +237,19 @@ def _exchange_code(code):
 def restore_session():
     """Restore a 30-day login from a browser cookie or an older signed URL."""
     params = st.query_params
+
+    # CookieManager is a browser component: a successful set call alone does
+    # not prove the browser stored it. Keep the signed URL fallback until readback.
+    pending_cookie = st.session_state.get("_qcl_cookie_probe")
+    if pending_cookie:
+        if _cookie_get("qcl") == pending_cookie:
+            st.session_state.pop("_qcl_cookie_probe", None)
+            st.session_state.pop("_qcl_cookie_fallback", None)
+            _clear_qcl_query_param()
+        else:
+            st.session_state.pop("_qcl_cookie_probe", None)
+            st.session_state["_qcl_cookie_fallback"] = True
+
     if st.session_state.get("discord_user") and st.session_state.get("auth_expires_at", 0) <= time.time():
         st.session_state.pop("discord_user", None)
         st.session_state.pop("auth_expires_at", None)
@@ -252,12 +272,17 @@ def restore_session():
             st.session_state["discord_user"] = u
             st.session_state["auth_expires_at"] = time.time() + _TOKEN_TTL
             
-            # Persist in the browser; never expose a new login token in the URL
-            # when cookie support is installed.
+            # Retain a URL fallback until the cookie can be read back. If the
+            # browser blocks the component's cookie, refreshes still restore login.
             token = _sign({"id": u["id"], "name": u["global_name"],
                            "avatar": u["avatar"], "exp": time.time() + _TOKEN_TTL})
-            if not _cookie_set("qcl", token):
-                st.query_params["qcl"] = token
+            cookie_write_started = _cookie_set("qcl", token)
+            st.query_params["qcl"] = token
+            if cookie_write_started:
+                st.session_state["_qcl_cookie_probe"] = token
+            else:
+                st.session_state.pop("_qcl_cookie_probe", None)
+                st.session_state["_qcl_cookie_fallback"] = True
             _rerun()
         else:
             st.error("🚨 Discord Login Failed! Check that your Client ID, Client Secret, and Redirect URI match perfectly in Streamlit Cloud Secrets.")
@@ -265,8 +290,8 @@ def restore_session():
         return
 
     # 2. Saved cookie (preferred) or existing signed URL link (legacy).
-    tok = _cookie_get("qcl")
-    tok = tok or params.get("qcl")
+    cookie_tok = _cookie_get("qcl")
+    tok = cookie_tok or params.get("qcl")
     if tok:
         payload = _verify(tok if isinstance(tok, str) else tok[0])
         if payload:
@@ -274,8 +299,15 @@ def restore_session():
                 "id": payload["id"], "username": payload["name"],
                 "global_name": payload["name"], "avatar": payload.get("avatar")}
             st.session_state["auth_expires_at"] = payload["exp"]
-            if params.get("qcl") and _cookie_set("qcl", tok):
-                st.query_params.clear()
+            if params.get("qcl"):
+                if cookie_tok == tok:
+                    st.session_state.pop("_qcl_cookie_fallback", None)
+                    _clear_qcl_query_param()
+                elif _cookie_set("qcl", tok):
+                    # Do not remove ?qcl until a later run confirms the cookie.
+                    st.session_state["_qcl_cookie_probe"] = tok
+                else:
+                    st.session_state["_qcl_cookie_fallback"] = True
 
 
 def current_user():
@@ -308,10 +340,14 @@ def login_widget(key="sidebar"):
         if c2.button("Log out", key=f"logout_{key}"):
             st.session_state.pop("discord_user", None)
             st.session_state.pop("auth_expires_at", None)
+            st.session_state.pop("_qcl_cookie_probe", None)
+            st.session_state.pop("_qcl_cookie_fallback", None)
             if _cookie_get("qcl"):
                 _cookie_delete("qcl")
             st.query_params.clear()
             _rerun()
+        if st.session_state.get("_qcl_cookie_fallback"):
+            st.caption("Browser cookie storage wasn’t confirmed; keep this signed login link private.")
     else:
         st.markdown(
             f"<a href='{_login_url()}' style='display:inline-block;"
@@ -1551,8 +1587,8 @@ st.sidebar.caption("EXPLORE")
 view_mode = st.sidebar.radio("Navigation", VIEWS, label_visibility="collapsed", key="qcl_nav")
 try:
     login_widget(key="sidebar")
-except Exception:
-    pass
+except Exception as exc:
+    st.sidebar.error(f"Discord login display failed: {type(exc).__name__}: {exc}")
 st.sidebar.divider()
 if os.path.exists("Logo.png"):
     st.sidebar.image("Logo.png", width=140)
