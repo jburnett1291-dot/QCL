@@ -8,6 +8,14 @@ Data source : Google Sheet (CSV export) — Type='Total' rows are source of trut
 Run         : streamlit run qcl_hub.py
 
 
+v3.3 CHANGELOG
+--------------
+* DRAFT ROOM      : live Railway draft board, authenticated picks, commissioner
+                    controls, approved-registration pool sync, and a live stats-based
+                    stock overlay. Stock uses the existing Impact Load formula;
+                    draft order setup remains outside the current API.
+
+
 v3.2 CHANGELOG
 --------------
 * PLAYOFFS VIEW   : dedicated postseason section (Game_ID 9001-9999). Same stat
@@ -691,6 +699,7 @@ def _submit_streamlit_registration(payload, uploads):
 
 _QTCG_API_DEFAULT = "https://diligent-eagerness-test-9422.up.railway.app"
 _QCL_SOURCE_REPO = "jburnett1291-dot/QCL"
+_QCL_RAW_BASE = f"https://raw.githubusercontent.com/{_QCL_SOURCE_REPO}/main/"
 
 
 def _qtcg_api_base():
@@ -810,6 +819,231 @@ def _qtcg_stat(value):
         return _html.escape(str(value)[:16])
 
 
+@st.cache_data(ttl=20, show_spinner=False)
+def _qcl_public_sources():
+    """Read the public QCL source-of-truth files without a GitHub token."""
+    paths = {
+        "save": "fantasy_save.json",
+        "market": "fantasy_market.json",
+        "stats": "player_stats.json",
+        "meta": "cards/meta.json",
+    }
+
+    def _read(path):
+        response = requests.get(
+            _QCL_RAW_BASE + path,
+            headers={"Accept": "application/json"},
+            timeout=12,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise RuntimeError(f"QCL source file {path} is not a JSON object.")
+        return result
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(paths)) as pool:
+        return dict(zip(paths, pool.map(_read, paths.values())))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _qcl_card_art_files():
+    """List public card art filenames; cache separately to respect API rate limits."""
+    try:
+        response = requests.get(
+            f"https://api.github.com/repos/{_QCL_SOURCE_REPO}/contents/cards",
+            params={"ref": "main"},
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "QCL-Streamlit-Hub",
+            },
+            timeout=8,
+        )
+        if not response.ok:
+            return []
+        payload = response.json()
+        if not isinstance(payload, list):
+            return []
+        return [
+            str(item.get("name"))
+            for item in payload
+            if isinstance(item, dict)
+            and str(item.get("name", "")).lower().endswith(
+                (".png", ".jpg", ".jpeg", ".webp", ".gif")
+            )
+        ]
+    except Exception:
+        return []
+
+
+def _qcl_binder_snapshot(user):
+    """Build a signed-in user's card view directly from QCL's public files."""
+    uid = str((user or {}).get("id", "")).strip()
+    if not uid.isdigit():
+        raise RuntimeError("Your Discord account ID is unavailable.")
+    sources = _qcl_public_sources()
+    save = sources.get("save", {})
+    users = save.get("users", {}) if isinstance(save, dict) else {}
+    entry = users.get(uid) if isinstance(users, dict) else None
+    entry = entry if isinstance(entry, dict) else None
+    owned = entry.get("cards", []) if entry else []
+
+    counts = {}
+    if isinstance(owned, dict):
+        for name, amount in owned.items():
+            try:
+                count = int(amount)
+            except (TypeError, ValueError):
+                count = 1
+            if count > 0:
+                counts[str(name)] = count
+    elif isinstance(owned, list):
+        for card in owned:
+            if isinstance(card, str) and card.strip():
+                name = card.strip()
+            elif isinstance(card, dict) and card.get("name"):
+                name = str(card["name"]).strip()
+            else:
+                continue
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+
+    market = sources.get("market", {})
+    market_cards = market.get("cards", {}) if isinstance(market, dict) else {}
+    if not isinstance(market_cards, dict):
+        market_cards = {}
+    if not market_cards and isinstance(market, dict):
+        market_cards = {
+            str(name): value
+            for name, value in market.items()
+            if isinstance(value, dict)
+            and any(key in value for key in ("tier", "cls", "legend"))
+        }
+    market_folded = {str(name).casefold(): value for name, value in market_cards.items()}
+    rarity_map = market.get("rarity", {}) if isinstance(market, dict) else {}
+    rarity_map = rarity_map if isinstance(rarity_map, dict) else {}
+    stats = sources.get("stats", {})
+    stats_folded = {str(name).casefold(): value for name, value in stats.items()}
+    meta = sources.get("meta", {})
+    art_by_player = {}
+    art_by_stem = {}
+    for filename in _qcl_card_art_files():
+        stem = filename.rsplit(".", 1)[0]
+        raw_url = f"{_QCL_RAW_BASE}cards/{urllib.parse.quote(filename)}"
+        card_meta = meta.get(stem, {}) if isinstance(meta, dict) else {}
+        player = card_meta.get("player") if isinstance(card_meta, dict) else None
+        if isinstance(player, str) and player.strip():
+            art_by_player.setdefault(player.strip().casefold(), raw_url)
+        art_by_stem.setdefault(
+            re.sub(r"[^a-z0-9]+", "", stem.casefold()), raw_url
+        )
+
+    cards, ignored = [], []
+    for name, count in counts.items():
+        if name.casefold() in {"total", "loading"}:
+            ignored.append(name)
+            continue
+        catalog = market_cards.get(name)
+        if not isinstance(catalog, dict):
+            catalog = market_folded.get(name.casefold(), {})
+        if not isinstance(catalog, dict):
+            catalog = {}
+        stat_line = stats.get(name)
+        if not isinstance(stat_line, dict):
+            stat_line = stats_folded.get(name.casefold(), {})
+        if not isinstance(stat_line, dict):
+            stat_line = {}
+        tier = (
+            catalog.get("tier")
+            or catalog.get("cls")
+            or rarity_map.get(name)
+            or rarity_map.get(name.casefold())
+            or ("Legendary" if catalog.get("legend") else "Common")
+        )
+        cards.append({
+            "name": name,
+            "tier": str(tier),
+            "count": count,
+            "img": (
+                art_by_player.get(name.casefold())
+                or art_by_stem.get(re.sub(r"[^a-z0-9]+", "", name.casefold()), "")
+            ),
+            "stats": {
+                "ppg": stat_line.get("ppg"), "rpg": stat_line.get("rpg"),
+                "apg": stat_line.get("apg"), "spg": stat_line.get("spg"),
+                "bpg": stat_line.get("bpg"), "fp": stat_line.get("fp"),
+                "gp": stat_line.get("gp"),
+            },
+        })
+    tier_order = {"legendary": 0, "epic": 1, "rare": 2, "uncommon": 3, "common": 4}
+    cards.sort(key=lambda card: (
+        tier_order.get(str(card.get("tier", "")).casefold(), 5),
+        str(card.get("name", "")).casefold(),
+    ))
+    return {
+        "uid": uid,
+        "entry": entry,
+        "raw_counts": counts,
+        "cards": cards,
+        "total_owned": sum(int(card["count"]) for card in cards),
+        "ignored_rows": ignored,
+    }
+
+
+def _qtcg_snapshot_mismatch(snapshot, balance, binder, starter=None, lineup=None):
+    """Refuse QTCG mutations when Railway is not reading the same QCL account."""
+    expected = snapshot.get("raw_counts", {})
+    actual = {}
+    for card in binder.get("cards", []) if isinstance(binder, dict) else []:
+        if not isinstance(card, dict) or not card.get("name"):
+            continue
+        name = str(card["name"])
+        try:
+            actual[name] = max(1, int(card.get("count", 1)))
+        except (TypeError, ValueError):
+            actual[name] = 1
+    if actual != expected:
+        return (
+            "Railway is not returning the same card counts as QCL. "
+            "Check that its GITHUB_TOKEN can read and write the QCL repository; "
+            "no pack or roster change was sent."
+        )
+
+    entry = snapshot.get("entry") or {}
+    if isinstance(balance, dict) and not balance.get("owner"):
+        try:
+            expected_coins = int(entry.get("coins", 0))
+            actual_coins = int(balance.get("coins", 0))
+            if expected_coins != actual_coins:
+                return (
+                    "Railway's coin balance does not match QCL's saved balance. "
+                    "No pack or roster change was sent."
+                )
+        except (TypeError, ValueError):
+            return "Railway returned an unreadable coin balance; no change was sent."
+
+    if isinstance(starter, dict):
+        expected_claimed = bool(entry.get("starter_claimed"))
+        if bool(starter.get("claimed")) != expected_claimed:
+            return "Railway's starter status does not match the QCL save; no change was sent."
+
+    if isinstance(lineup, dict):
+        expected_roster = entry.get("roster", {}) if isinstance(entry, dict) else {}
+        expected_roster = expected_roster if isinstance(expected_roster, dict) else {}
+        received = lineup.get("roster", {})
+        received = received if isinstance(received, dict) else {}
+        actual_roster = {}
+        for slot in ("G", "F", "C", "B1", "B2"):
+            value = received.get(slot)
+            actual_roster[slot] = (
+                value.get("name") if isinstance(value, dict) else value
+            )
+        if any(actual_roster.get(slot) != expected_roster.get(slot)
+               for slot in ("G", "F", "C", "B1", "B2")):
+            return "Railway's saved lineup does not match QCL; no roster change was sent."
+    return ""
+
+
 def _qtcg_binder_card_html(card, api_base):
     name = _html.escape(str(card.get("name") or "Unknown player"))
     tier = str(card.get("tier") or "Common")
@@ -853,20 +1087,31 @@ def _qtcg_binder_card_html(card, api_base):
 
 def render_qtcg_binder(user):
     st.title("🗂 My QTCG Binder")
-    st.caption("Your shared Discord collection. Tap or click any card to flip it for player stats.")
+    st.caption("Your shared QCL collection. Tap or click any card to flip it for player stats.")
     if not user:
         st.info("Log in with Discord to view the binder linked to your account.")
         login_widget(key="qtcg_binder")
         return
     try:
-        api_base = _qtcg_api_base()
-        result = _qtcg_api_request("POST", "/binder", user)
-        cards = result.get("cards", [])
-        if not isinstance(cards, list):
-            raise RuntimeError("The QTCG API returned an invalid binder.")
+        snapshot = _qcl_binder_snapshot(user)
+        cards = snapshot["cards"]
     except Exception as exc:
-        st.error(f"Could not load your shared QTCG binder: {exc}")
+        st.error(f"Could not load the QCL binder source: {exc}")
         return
+
+    if st.button("↻ Refresh from QCL", key="qcl_binder_refresh"):
+        _qcl_public_sources.clear()
+        _rerun()
+    if not snapshot.get("entry"):
+        st.info(
+            "No QTCG account is saved for this Discord login in QCL. "
+            "Link the same Discord account used for your collection."
+        )
+        return
+    api_base = _QCL_RAW_BASE
+    if snapshot.get("ignored_rows"):
+        ignored = ", ".join(snapshot["ignored_rows"])
+        st.caption(f"Skipped non-card placeholder rows in the save: {ignored}.")
 
     def _copies(card):
         try:
@@ -880,7 +1125,7 @@ def render_qtcg_binder(user):
         if isinstance(card, dict) and str(card.get("tier", "")).casefold() == "legendary"
     )
     m1, m2, m3 = st.columns(3)
-    m1.metric("Cards owned", total)
+    m1.metric("Cards owned", snapshot.get("total_owned", total))
     m2.metric("Unique cards", len(cards))
     m3.metric("Legendary copies", legendary)
     if not cards:
@@ -970,6 +1215,935 @@ def render_qtcg_binder(user):
     if st.button("🎁 Open Packs", key="binder_open_packs_bottom"):
         st.session_state["qcl_nav"] = "🎁 Open Packs"
         _rerun()
+
+
+def render_qtcg_desk(user):
+    st.title("🎮 QTCG Desk")
+    st.caption(
+        "Use the same QCL collection from Streamlit while Discord app verification is pending."
+    )
+    if not user:
+        st.info("Log in with Discord to manage the QTCG account linked to your collection.")
+        login_widget(key="qtcg_desk")
+        return
+
+    try:
+        snapshot = _qcl_binder_snapshot(user)
+        balance = _qtcg_api_request("GET", "/balance", user)
+        binder = _qtcg_api_request("POST", "/binder", user)
+        starter = _qtcg_api_request("GET", "/starter_status", user)
+        lineup = _qtcg_api_request("GET", "/lineup", user)
+    except Exception as exc:
+        st.error(f"QTCG controls are unavailable: {exc}")
+        return
+
+    mismatch = _qtcg_snapshot_mismatch(
+        snapshot, balance, binder, starter=starter, lineup=lineup
+    )
+    if mismatch:
+        st.error(mismatch)
+        st.info(
+            "The binder still reads directly from QCL. To enable Railway-backed writes, "
+            "set Railway's GITHUB_TOKEN to a token authorized for QCL repository Contents "
+            "read/write, then retry here."
+        )
+        return
+
+    action_notice = st.session_state.pop("_qtcg_action_notice", None)
+    if isinstance(action_notice, dict) and action_notice.get("uid") == snapshot["uid"]:
+        st.success(action_notice.get("message", "QTCG action completed."))
+        pulled = action_notice.get("cards") or []
+        if pulled:
+            st.write("Cards: " + " · ".join(str(card) for card in pulled))
+
+    coins = balance.get("coins", 0)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Coins", str(coins))
+    m2.metric("Cards owned", snapshot.get("total_owned", 0))
+    m3.metric(
+        "Starter",
+        "Claimed" if starter.get("claimed") else "Available",
+    )
+
+    starter_tab, lineup_tab = st.tabs(["🎁 Starter pack", "🧩 Lineup lock"])
+    with starter_tab:
+        packs = starter.get("packs", {})
+        if not isinstance(packs, dict) or not packs:
+            packs = {
+                "glass_cleaner": {
+                    "name": "The Glass Cleaner Pack",
+                    "desc": "2 Rebounding Bigs + 1 Scoring Guard — high floor.",
+                },
+                "floor_general": {
+                    "name": "The Floor General Pack",
+                    "desc": "2 Playmaking Guards + 1 Finishing Big — efficiency & multipliers.",
+                },
+                "pure_scorer": {
+                    "name": "The Pure Scorer Pack",
+                    "desc": "2 Shot-Creating Wings + 1 Defensive Anchor — high ceiling, high risk.",
+                },
+                "lockdown": {
+                    "name": "The Lockdown Pack",
+                    "desc": "2 Defensive Specialists + 1 Two-Way Wing — the disruptor.",
+                },
+            }
+        if starter.get("claimed"):
+            claimed_key = str(starter.get("pack") or "")
+            claimed_name = packs.get(claimed_key, {}).get("name", claimed_key)
+            st.success(f"Your one-time starter claim is already used: {claimed_name}.")
+        else:
+            pack_keys = list(packs)
+            pack_key = st.selectbox(
+                "Choose your starter strategy",
+                pack_keys,
+                format_func=lambda key: (
+                    f"{packs[key].get('name', key)} — {packs[key].get('desc', '')}"
+                ),
+                key="qtcg_starter_choice",
+            )
+            st.warning(
+                "This claim is one-time only. It adds 3 cards and 500 coins to your QCL account."
+            )
+            confirm_starter = st.checkbox(
+                "I understand I can claim only one starter pack.",
+                key="qtcg_starter_confirm",
+            )
+            if st.button(
+                "Claim starter pack",
+                type="primary",
+                disabled=not confirm_starter,
+                key="qtcg_claim_starter",
+            ):
+                try:
+                    result = _qtcg_api_request(
+                        "POST", "/starter", user, {"pack": pack_key}
+                    )
+                except Exception as exc:
+                    st.error(f"Starter claim failed: {exc}")
+                else:
+                    pulled_cards = [
+                        card.get("name")
+                        for card in result.get("cards", [])
+                        if isinstance(card, dict) and card.get("name")
+                    ]
+                    st.session_state["_qtcg_action_notice"] = {
+                        "uid": snapshot["uid"],
+                        "message": (
+                            f"Starter claim complete: {result.get('pack', packs[pack_key].get('name', pack_key))}; "
+                            f"balance is {result.get('coins', 'updated')} coins."
+                        ),
+                        "cards": pulled_cards,
+                    }
+                    _qcl_public_sources.clear()
+                    _rerun()
+
+    with lineup_tab:
+        slots = ["G", "F", "C", "B1", "B2"]
+        slot_labels = {
+            "G": "Guard", "F": "Forward", "C": "Center",
+            "B1": "Bench 1", "B2": "Bench 2",
+        }
+        current = lineup.get("roster", {})
+        current = current if isinstance(current, dict) else {}
+        current_names = {
+            slot: (
+                current.get(slot, {}).get("name")
+                if isinstance(current.get(slot), dict)
+                else current.get(slot)
+            )
+            for slot in slots
+        }
+        if lineup.get("locked"):
+            remaining = max(0, int(lineup.get("remaining_seconds", 0) or 0))
+            st.warning(
+                f"Your five-player lineup is locked for about {remaining / 3600:.1f} more hours."
+            )
+            for slot in slots:
+                st.write(f"**{slot_labels[slot]}:** {current_names.get(slot) or '—'}")
+        else:
+            owned_names = sorted(
+                {str(card.get("name")) for card in snapshot["cards"] if card.get("name")},
+                key=str.casefold,
+            )
+            if not owned_names:
+                st.info("Claim a starter pack or open packs before setting a lineup.")
+            else:
+                options = ["—"] + owned_names
+                columns = st.columns(5)
+                chosen = {}
+                for slot, column in zip(slots, columns):
+                    previous = current_names.get(slot)
+                    index = options.index(previous) if previous in options else 0
+                    with column:
+                        chosen[slot] = st.selectbox(
+                            slot_labels[slot],
+                            options,
+                            index=index,
+                            key=f"qtcg_roster_{slot}",
+                        )
+                roster = {
+                    slot: (name if name != "—" else None)
+                    for slot, name in chosen.items()
+                }
+                filled = [name for name in roster.values() if name]
+                valid_roster = (
+                    len(filled) == 5 and len(set(filled)) == 5
+                )
+                if valid_roster:
+                    st.markdown("**Lineup preview**")
+                    st.write(" · ".join(
+                        f"{slot_labels[slot]}: {roster[slot]}" for slot in slots
+                    ))
+                else:
+                    st.caption("Choose five different owned cards to enable lineup lock.")
+                st.warning(
+                    "Saving this lineup writes to the shared QCL save and locks all five slots "
+                    "for 48 hours."
+                )
+                confirm_lock = st.checkbox(
+                    "I understand this lineup cannot be changed for 48 hours.",
+                    key="qtcg_lineup_lock_confirm",
+                )
+                if st.button(
+                    "Save and lock lineup",
+                    type="primary",
+                    disabled=not (valid_roster and confirm_lock),
+                    key="qtcg_lock_lineup",
+                ):
+                    try:
+                        _qtcg_api_request(
+                            "POST", "/lineup", user, {"roster": roster}
+                        )
+                    except Exception as exc:
+                        st.error(f"Lineup lock failed: {exc}")
+                    else:
+                        st.session_state["_qtcg_action_notice"] = {
+                            "uid": snapshot["uid"],
+                            "message": "Lineup saved and locked for 48 hours.",
+                        }
+                        _qcl_public_sources.clear()
+                        _rerun()
+
+
+def _draft_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _draft_player_id(player, fallback=""):
+    return str(
+        player.get("discord_id") or player.get("id") or fallback
+        or player.get("gamertag") or ""
+    ).strip()
+
+
+def _draft_player_rating(player):
+    for key in ("ovr", "overall", "rating", "rank_score"):
+        try:
+            return float(player.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _draft_player_label(player):
+    name = str(player.get("gamertag") or player.get("name") or "Unnamed prospect")
+    position = str(player.get("position") or "")
+    rating = _draft_player_rating(player)
+    parts = [name]
+    if position:
+        parts.append(position)
+    if rating:
+        parts.append(f"OVR {rating:g}")
+    return " · ".join(parts)
+
+
+def _draft_stock_index(stats_df):
+    """Live stock overlay from the latest available QCL season in the stats sheet."""
+    if not isinstance(stats_df, pd.DataFrame) or stats_df.empty:
+        return {}, None
+    players = stats_df[
+        stats_df.get("Type", pd.Series(index=stats_df.index, dtype=str))
+        .astype(str).str.lower().eq("player")
+    ].copy()
+    if players.empty or "Player/Team" not in players.columns:
+        return {}, None
+    if "Era" in players.columns:
+        qcl = players[players["Era"].astype(str).str.upper().eq("QCL")]
+        if not qcl.empty:
+            players = qcl
+    if "Season" in players.columns:
+        seasons = pd.to_numeric(players["Season"], errors="coerce")
+        players = players[seasons == seasons.max()]
+        season_label = (
+            str(int(seasons.max())) if not seasons.dropna().empty else None
+        )
+    else:
+        season_label = None
+    if players.empty:
+        return {}, season_label
+
+    numeric = {}
+    for column in ("PTS", "AST", "REB", "STL", "BLK"):
+        numeric[column] = (
+            pd.to_numeric(players[column], errors="coerce").fillna(0)
+            if column in players.columns
+            else pd.Series(0.0, index=players.index)
+        )
+    players["_draft_impact"] = (
+        numeric["PTS"] + 1.5 * numeric["AST"] + numeric["REB"]
+        + 2 * (numeric["STL"] + numeric["BLK"])
+    )
+    game_col = "Game_ID" if "Game_ID" in players.columns else "Player/Team"
+    group = players.groupby("Player/Team", dropna=True)
+    summary = group.agg(
+        GP=("GKey", "nunique") if "GKey" in players.columns else (game_col, "nunique"),
+        **{
+            column: (column, "mean")
+            for column in ("PTS", "AST", "REB", "STL", "BLK")
+            if column in players.columns
+        },
+        impact=("_draft_impact", "mean"),
+    ).reset_index()
+    if summary.empty:
+        return {}, season_label
+
+    if game_col in players.columns:
+        recent = (
+            players.sort_values(game_col)
+            .groupby("Player/Team", dropna=True)
+            .tail(3)
+            .groupby("Player/Team")["_draft_impact"]
+            .mean()
+        )
+        summary["recent_delta"] = (
+            summary["Player/Team"].map(recent) - summary["impact"]
+        )
+    else:
+        summary["recent_delta"] = 0.0
+    summary["stock_pct"] = summary["impact"].rank(pct=True) * 100
+
+    result = {}
+    for _, row in summary.iterrows():
+        name = str(row["Player/Team"])
+        try:
+            key = name_match_key(name)
+        except Exception:
+            key = re.sub(r"[^a-z0-9]+", "", name.casefold())
+        result[key] = {
+            "GP": int(row.get("GP", 0) or 0),
+            "Impact Load": float(row.get("impact", 0) or 0),
+            "Stock": float(row.get("stock_pct", 0) or 0),
+            "Recent Δ": float(row.get("recent_delta", 0) or 0),
+            "PTS": float(row.get("PTS", 0) or 0),
+            "AST": float(row.get("AST", 0) or 0),
+            "REB": float(row.get("REB", 0) or 0),
+            "STL": float(row.get("STL", 0) or 0),
+            "BLK": float(row.get("BLK", 0) or 0),
+        }
+    return result, season_label
+
+
+def _draft_approved_registration_players():
+    """Only approved Draft Player registrations enter the commissioner sync list."""
+    players = {}
+    for record in _official_records():
+        if record.get("role") != "draft_player":
+            continue
+        people = _people(record) or [record]
+        for person in people:
+            discord_id = str(
+                person.get("discord_id") or record.get("owner_id") or ""
+            ).strip()
+            gamertag = str(
+                person.get("gamertag_or_psn") or person.get("gamertag")
+                or person.get("display_name") or record.get("gamertag_or_psn")
+                or record.get("gamertag") or ""
+            ).strip()
+            if not discord_id.isdigit() or not gamertag:
+                continue
+            players.setdefault(discord_id, {
+                "discord_id": discord_id,
+                "gamertag": gamertag[:80],
+                "position": str(
+                    person.get("position") or record.get("position") or ""
+                )[:24],
+                "eligible": True,
+            })
+    return sorted(players.values(), key=lambda player: player["gamertag"].casefold())
+
+
+def _draft_store_result(user, result, message):
+    updated = result.get("draft")
+    uid = str((user or {}).get("id", ""))
+    if isinstance(updated, dict):
+        st.session_state["_qcl_draft_cache"] = {
+            "uid": uid,
+            "draft": updated,
+        }
+    st.session_state["_qcl_draft_notice"] = {"uid": uid, "message": message}
+    _rerun()
+
+
+def _draft_submit_action(user, payload, success_message):
+    try:
+        result = _qtcg_api_request("POST", "/draft/action", user, payload)
+    except Exception as exc:
+        st.error(f"Draft action was not saved: {exc}")
+        return
+    _draft_store_result(user, result, success_message)
+
+
+def render_draft_room(user, stats_df=None, stats_health=None):
+    st.title("🧢 Draft Room")
+    st.caption(
+        "Live QCL draft state and picks are handled by the existing Railway service. "
+        "Your Discord session determines whether you can view, coach, or commission."
+    )
+    if not user:
+        st.info("Log in with Discord to view the shared draft board.")
+        login_widget(key="draft_room")
+        return
+
+    st.warning(
+        "Refreshing the board can start a due scheduled draft or apply an automatic "
+        "pick when the Railway timer has expired. The board does not poll in the "
+        "background; refresh is manual."
+    )
+    uid = str(user.get("id", ""))
+    cached = st.session_state.get("_qcl_draft_cache")
+    if not isinstance(cached, dict) or cached.get("uid") != uid:
+        cached = None
+        st.session_state.pop("_qcl_draft_cache", None)
+
+    board_col, stats_col = st.columns(2)
+    if board_col.button(
+        "Refresh draft board",
+        type="primary",
+        use_container_width=True,
+        key="qcl_draft_load_state",
+    ):
+        try:
+            refreshed = _qtcg_api_request("GET", "/draft/state", user)
+        except Exception as exc:
+            st.error(f"Draft board could not be refreshed: {exc}")
+        else:
+            cached = {"uid": uid, "draft": refreshed}
+            st.session_state["_qcl_draft_cache"] = cached
+    if stats_col.button(
+        "Refresh stats from sheet",
+        use_container_width=True,
+        key="qcl_draft_refresh_stats",
+    ):
+        try:
+            load_data.clear()
+            latest_stats = load_data()
+            if isinstance(latest_stats, dict):
+                stats_df = latest_stats.get("df", pd.DataFrame())
+                stats_health = latest_stats.get("health", {})
+                st.success("Draft stock recalculated from the latest sheet data.")
+            else:
+                st.warning(
+                    f"Stats refresh failed; showing the last loaded data if available. "
+                    f"{str(latest_stats)[:240]}"
+                )
+        except Exception as exc:
+            st.warning(
+                f"Stats refresh failed; showing the last loaded data if available. "
+                f"{type(exc).__name__}: {exc}"
+            )
+    stock_by_name, stock_season = _draft_stock_index(stats_df)
+    if isinstance(stats_health, dict):
+        sheet_status = stats_health.get("Google Sheet")
+        st.caption(
+            f"Stats feed: {sheet_status or 'status unknown'}"
+            + (f" · QCL season used: {stock_season}" if stock_season else "")
+        )
+    st.caption(
+        "Live draft stock is the latest available QCL-season percentile of the Hub’s existing "
+        "Impact Load formula (PTS + 1.5×AST + REB + 2×(STL + BLK)); recent change "
+        "compares the last three games with the season average. It updates on sheet "
+        "refresh and is not written back to the draft JSON."
+    )
+
+    notice = st.session_state.pop("_qcl_draft_notice", None)
+    if isinstance(notice, dict) and notice.get("uid") == uid:
+        st.success(notice.get("message", "Draft action completed."))
+
+    draft = cached.get("draft") if isinstance(cached, dict) else None
+    if not isinstance(draft, dict):
+        st.info("Load the live board to see draft status, prospects, and pick order.")
+        return
+
+    access = str(draft.get("access") or "player")
+    my_team = str(draft.get("my_team") or "")
+    status = str(draft.get("status") or "setup")
+    teams = [str(team) for team in draft.get("teams", []) if str(team)]
+    order = [slot for slot in (draft.get("order") or []) if isinstance(slot, dict)]
+    picks = [pick for pick in (draft.get("picks") or []) if isinstance(pick, dict)]
+    current_index = _draft_int(draft.get("current_pick"), 0) or 0
+    current_turn = order[current_index] if 0 <= current_index < len(order) else None
+    current_team = str(current_turn.get("team") or "") if current_turn else ""
+    current_pick = _draft_int(current_turn.get("pick")) if current_turn else None
+
+    raw_players = draft.get("players", {})
+    if isinstance(raw_players, dict):
+        player_pairs = list(raw_players.items())
+    elif isinstance(raw_players, list):
+        player_pairs = [
+            (str(index), player) for index, player in enumerate(raw_players)
+        ]
+    else:
+        player_pairs = []
+    player_by_id = {}
+    for fallback, player in player_pairs:
+        if not isinstance(player, dict):
+            continue
+        player_id = _draft_player_id(player, fallback)
+        if player_id:
+            player_by_id[player_id] = player
+    available = [
+        (player_id, player)
+        for player_id, player in player_by_id.items()
+        if not player.get("drafted_by") and player.get("eligible", True)
+    ]
+    available.sort(key=lambda item: _draft_player_rating(item[1]), reverse=True)
+
+    stats = st.columns(4)
+    stats[0].metric("Draft status", status.replace("_", " ").title())
+    stats[1].metric(
+        "Current pick",
+        f"#{current_pick}" if current_pick is not None else "—",
+    )
+    stats[2].metric("On the clock", current_team or "—")
+    stats[3].metric("Prospects available", len(available))
+    st.caption(
+        f"Access: {access.title()}"
+        + (f" · Your team: {my_team}" if my_team else "")
+        + f" · Board revision: {draft.get('revision', 'unknown')}"
+    )
+
+    if not order:
+        st.warning(
+            "No pick order is configured in the shared draft file. The current "
+            "Railway API can run and manage an existing order, but it does not "
+            "provide an order-setup action. A commissioner must seed the order "
+            "before a draft can start."
+        )
+    elif current_turn:
+        deadline = draft.get("deadline_at")
+        remaining = None
+        try:
+            if deadline is not None:
+                remaining = max(0, int(float(deadline) - time.time()))
+        except (TypeError, ValueError):
+            remaining = None
+        st.subheader("Current pick")
+        line = f"**Pick #{current_pick}** · **{current_team}**"
+        if remaining is not None and status == "active":
+            line += f" · {remaining} seconds on the clock"
+        st.markdown(line)
+    elif status != "complete":
+        st.info("There is no current pick. Check the configured order and draft status.")
+
+    with st.expander("Upcoming pick order", expanded=bool(order)):
+        if order:
+            upcoming = order[current_index:current_index + 15]
+            st.dataframe(
+                [{
+                    "Pick": slot.get("pick", ""),
+                    "Round": slot.get("round", ""),
+                    "Team": slot.get("team", ""),
+                } for slot in upcoming],
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.caption("No pick slots are configured.")
+
+    can_pick = bool(
+        status == "active" and current_turn
+        and (
+            access == "admin"
+            or (access == "coach" and my_team and my_team == current_team)
+        )
+    )
+    if access in {"admin", "coach"}:
+        with st.expander("Make a pick", expanded=can_pick):
+            if not current_turn or status != "active":
+                st.info("The draft must be active and have a current pick.")
+            elif not can_pick:
+                st.info(
+                    f"{current_team or 'The current team'} is on the clock. "
+                    "Coaches can pick only for their own team; commissioner access "
+                    "can override."
+                )
+            elif not available:
+                st.warning("There are no undrafted prospects available.")
+            else:
+                chosen_id = st.selectbox(
+                    f"Choose a prospect for pick #{current_pick}",
+                    [player_id for player_id, _ in available],
+                    format_func=lambda player_id: _draft_player_label(
+                        player_by_id[player_id]
+                    ),
+                    key=f"qcl_draft_player_{current_pick}",
+                )
+                chosen = player_by_id[chosen_id]
+                st.warning(
+                    f"Recording {_draft_player_label(chosen)} for {current_team} "
+                    "advances the shared board and starts the next pick clock."
+                )
+                if st.button(
+                    f"Record pick #{current_pick}",
+                    type="primary",
+                    key=f"qcl_draft_submit_pick_{current_pick}",
+                ):
+                    _draft_submit_action(
+                        user,
+                        {"action": "pick", "player_id": chosen_id},
+                        f"Pick #{current_pick}: {_draft_player_label(chosen)} → {current_team}.",
+                    )
+
+    st.subheader("Available prospects")
+    if available:
+        st.dataframe(
+            [{
+                "Player": _draft_player_label(player),
+                "Position": player.get("position", ""),
+                "OVR": player.get("ovr", player.get("overall", player.get("rating", ""))),
+                "Eligible": player.get("eligible", True),
+                "Draft Stock": (
+                    f"{stock_by_name.get(name_match_key(player.get('gamertag') or player.get('name') or ''), {}).get('Stock', 0):.0f}th pct"
+                    if name_match_key(player.get("gamertag") or player.get("name") or "") in stock_by_name
+                    else "Unrated"
+                ),
+                "Impact Load": (
+                    round(stock_by_name[name_match_key(
+                        player.get("gamertag") or player.get("name") or ""
+                    )]["Impact Load"], 2)
+                    if name_match_key(player.get("gamertag") or player.get("name") or "") in stock_by_name
+                    else ""
+                ),
+                "Last 3 Δ": (
+                    round(stock_by_name[name_match_key(
+                        player.get("gamertag") or player.get("name") or ""
+                    )]["Recent Δ"], 2)
+                    if name_match_key(player.get("gamertag") or player.get("name") or "") in stock_by_name
+                    else ""
+                ),
+            } for _, player in available],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("No available prospects are in the current draft pool.")
+
+    if picks:
+        st.subheader("Drafted players")
+        st.dataframe(
+            [{
+                "Pick": pick.get("pick", ""),
+                "Team": pick.get("team", ""),
+                "Player": pick.get("player", ""),
+                "Source": pick.get("source", ""),
+            } for pick in reversed(picks)],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    if access != "admin":
+        return
+
+    st.subheader("Commissioner controls")
+    st.caption(
+        "Railway re-checks commissioner permissions for every write. "
+        "These controls change the shared QCL draft state."
+    )
+    with st.expander("Sync approved player registrations"):
+        if st.button(
+            "Refresh approved registration list",
+            key="qcl_draft_refresh_registrations",
+        ):
+            _public_registration_export.clear()
+            _rerun()
+        approved_players = _draft_approved_registration_players()
+        st.caption(
+            "Only approved Draft Player registrations are included; GM registrations, "
+            "availability, proof files, and social details are excluded."
+        )
+        if approved_players:
+            st.dataframe(
+                [{
+                    "Player": player["gamertag"],
+                    "Position": player["position"],
+                } for player in approved_players],
+                hide_index=True,
+                use_container_width=True,
+            )
+            registration_confirm = st.checkbox(
+                f"I confirm syncing these {len(approved_players)} approved players "
+                "into the shared draft pool.",
+                key="qcl_draft_registration_sync_confirm",
+            )
+            if st.button(
+                "Sync approved registrations to pool",
+                disabled=not registration_confirm,
+                key="qcl_draft_registration_sync",
+            ):
+                try:
+                    result = _qtcg_api_request(
+                        "POST",
+                        "/draft/players",
+                        user,
+                        {"players": approved_players},
+                    )
+                except Exception as exc:
+                    st.error(f"Registration sync failed: {exc}")
+                else:
+                    _draft_store_result(
+                        user,
+                        result,
+                        f"Synced {result.get('synced', 0)} approved draft registrations.",
+                    )
+        else:
+            st.info(
+                "No approved Draft Player registrations with a valid Discord ID "
+                "and gamertag are available to sync."
+            )
+    if status in {"setup", "scheduled", "stopped"}:
+        if order:
+            if st.button("Start draft now", key="qcl_draft_start"):
+                _draft_submit_action(
+                    user, {"action": "start"}, "Draft started."
+                )
+        else:
+            st.caption("Start is disabled until a pick order is configured.")
+    if status == "active":
+        pause_col, stop_col = st.columns(2)
+        if pause_col.button("Pause clock", key="qcl_draft_pause"):
+            _draft_submit_action(
+                user, {"action": "pause"}, "Draft clock paused."
+            )
+        stop_confirm = stop_col.checkbox(
+            "Confirm stop",
+            key="qcl_draft_stop_confirm",
+            help="Stopping changes the shared draft status.",
+        )
+        if stop_col.button(
+            "Stop draft",
+            disabled=not stop_confirm,
+            key="qcl_draft_stop",
+        ):
+            _draft_submit_action(user, {"action": "stop"}, "Draft stopped.")
+    elif status == "paused":
+        resume_col, stop_col = st.columns(2)
+        if resume_col.button("Resume clock", key="qcl_draft_resume"):
+            _draft_submit_action(
+                user, {"action": "resume"}, "Draft clock resumed."
+            )
+        stop_confirm = stop_col.checkbox(
+            "Confirm stop",
+            key="qcl_draft_stop_confirm_paused",
+            help="Stopping changes the shared draft status.",
+        )
+        if stop_col.button(
+            "Stop draft",
+            disabled=not stop_confirm,
+            key="qcl_draft_stop_paused",
+        ):
+            _draft_submit_action(user, {"action": "stop"}, "Draft stopped.")
+    elif status == "scheduled":
+        stop_confirm = st.checkbox(
+            "Confirm cancel of the scheduled draft",
+            key="qcl_draft_cancel_schedule_confirm",
+        )
+        if st.button(
+            "Cancel scheduled draft",
+            disabled=not stop_confirm,
+            key="qcl_draft_cancel_schedule",
+        ):
+            _draft_submit_action(user, {"action": "stop"}, "Scheduled draft stopped.")
+
+    if order and status != "complete":
+        with st.form("qcl_draft_schedule_form"):
+            schedule_value = st.text_input(
+                "Schedule time (ISO 8601 with timezone)",
+                placeholder="2026-10-01T19:30:00-05:00",
+            )
+            schedule_confirm = st.checkbox(
+                "I reviewed the schedule time and want to update the shared draft."
+            )
+            schedule_submit = st.form_submit_button("Schedule draft")
+        if schedule_submit:
+            try:
+                parsed = datetime.fromisoformat(
+                    schedule_value.strip().replace("Z", "+00:00")
+                )
+                if parsed.tzinfo is None:
+                    raise ValueError("Include a timezone offset, such as -05:00.")
+                if parsed.timestamp() <= time.time():
+                    raise ValueError("Choose a future time.")
+                if not schedule_confirm:
+                    raise ValueError("Confirm the schedule before submitting.")
+            except (TypeError, ValueError) as exc:
+                st.error(f"Schedule not submitted: {exc}")
+            else:
+                _draft_submit_action(
+                    user,
+                    {"action": "schedule", "scheduled_at": schedule_value.strip()},
+                    "Draft schedule updated.",
+                )
+
+    if status == "active" and current_turn:
+        advance_confirm = st.checkbox(
+            f"I confirm skipping pick #{current_pick} for {current_team}.",
+            key=f"qcl_draft_advance_confirm_{current_pick}",
+        )
+        if st.button(
+            "Force advance current pick",
+            disabled=not advance_confirm,
+            key=f"qcl_draft_force_advance_{current_pick}",
+        ):
+            _draft_submit_action(
+                user, {"action": "advance"}, f"Pick #{current_pick} was skipped."
+            )
+
+    if picks:
+        last_pick = picks[-1]
+        last_pick_number = last_pick.get("pick", "?")
+        last_pick_name = last_pick.get("player", "the last player")
+        undo_confirm = st.checkbox(
+            f"I confirm reversing pick #{last_pick_number} ({last_pick_name}).",
+            key=f"qcl_draft_undo_confirm_{last_pick_number}",
+        )
+        if st.button(
+            "Undo last pick",
+            disabled=not undo_confirm,
+            key=f"qcl_draft_undo_{last_pick_number}",
+        ):
+            _draft_submit_action(
+                user,
+                {"action": "undo"},
+                f"Pick #{last_pick_number} was reversed.",
+            )
+
+    used_picks = {
+        pick_no for pick in picks
+        if (pick_no := _draft_int(pick.get("pick"))) is not None
+    }
+    protected_picks = {
+        pick_no for value in (draft.get("protected_picks") or [])
+        if (pick_no := _draft_int(value)) is not None
+    }
+    future_slots = [
+        slot for slot in order
+        if (pick_no := _draft_int(slot.get("pick"))) is not None
+        and pick_no not in used_picks
+    ]
+    if future_slots:
+        with st.form("qcl_draft_protect_form"):
+            protect_pick = st.selectbox(
+                "Protect or unprotect a future pick",
+                [int(slot["pick"]) for slot in future_slots],
+                format_func=lambda pick_no: (
+                    f"Pick #{pick_no}"
+                    + (" · protected" if pick_no in protected_picks else "")
+                ),
+            )
+            protect_confirm = st.checkbox(
+                "I confirm changing protection on this future pick."
+            )
+            protect_submit = st.form_submit_button("Toggle pick protection")
+        if protect_submit:
+            if not protect_confirm:
+                st.error("Confirm the protection change before submitting.")
+            else:
+                _draft_submit_action(
+                    user,
+                    {"action": "protect", "pick": protect_pick},
+                    f"Protection toggled for pick #{protect_pick}.",
+                )
+
+        tradable_slots = [
+            slot for slot in future_slots
+            if _draft_int(slot.get("pick")) not in protected_picks
+        ]
+        if tradable_slots and teams:
+            with st.form("qcl_draft_trade_form"):
+                trade_pick = st.selectbox(
+                    "Future pick to trade",
+                    [int(slot["pick"]) for slot in tradable_slots],
+                    format_func=lambda pick_no: (
+                        f"Pick #{pick_no} · "
+                        + str(next(
+                            (slot.get("team", "") for slot in tradable_slots
+                             if _draft_int(slot.get("pick")) == pick_no),
+                            "",
+                        ))
+                    ),
+                )
+                destination = st.selectbox("Trade to team", teams)
+                trade_confirm = st.checkbox(
+                    "I confirm this trade changes the shared draft order."
+                )
+                trade_submit = st.form_submit_button("Trade future pick")
+            if trade_submit:
+                if not trade_confirm:
+                    st.error("Confirm the trade before submitting.")
+                else:
+                    _draft_submit_action(
+                        user,
+                        {"action": "trade", "pick": trade_pick, "to_team": destination},
+                        f"Pick #{trade_pick} traded to {destination}.",
+                    )
+
+    with st.expander("Merge prospect pool / team list"):
+        st.caption(
+            "Upload a JSON object with a players list or map, plus optional teams "
+            "and coaches. Existing pick history is preserved. This endpoint does "
+            "not configure the pick order."
+        )
+        with st.form("qcl_draft_pool_sync_form", clear_on_submit=True):
+            pool_file = st.file_uploader(
+                "Draft pool JSON",
+                type=["json"],
+                key="qcl_draft_pool_upload",
+            )
+            pool_confirm = st.checkbox(
+                "I reviewed this file; merging it updates the shared prospect pool."
+            )
+            pool_submit = st.form_submit_button("Merge draft pool")
+        if pool_submit:
+            if pool_file is None:
+                st.error("Choose a JSON file first.")
+            elif not pool_confirm:
+                st.error("Confirm the merge before submitting.")
+            else:
+                try:
+                    pool_payload = json.loads(pool_file.getvalue().decode("utf-8"))
+                    if not isinstance(pool_payload, dict):
+                        raise ValueError("The root JSON value must be an object.")
+                    pool_players = pool_payload.get("players")
+                    if not isinstance(pool_players, (list, dict)):
+                        raise ValueError("'players' must be an array or object.")
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    st.error(f"Draft pool JSON was not accepted: {exc}")
+                else:
+                    try:
+                        result = _qtcg_api_request(
+                            "POST", "/draft/players", user, pool_payload
+                        )
+                    except Exception as exc:
+                        st.error(f"Draft pool merge failed: {exc}")
+                    else:
+                        _draft_store_result(
+                            user,
+                            result,
+                            f"Draft pool merged; {result.get('synced', 0)} prospects processed.",
+                        )
 
 
 def _render_registration():
@@ -1913,6 +3087,8 @@ VIEWS = [
     "🏦 The Vault",
     "📈 Card Market",
     "🎴 Qwiks TCG",
+    "🎮 QTCG Desk",
+    "🧢 Draft Room",
     "🗂 My QTCG Binder",
     "👤 My Profile",
     "🎁 Open Packs",
@@ -1956,7 +3132,8 @@ if view_mode == "📱 Mobile Hub":
     st.caption("Tap a page below. This menu and the News and Film pages open without loading league statistics.")
     for label in [
         "📰 News & Updates", "📝 Register", "Film Terminal", "🏠 League Home & Awards",
-        "🛡️ League Teams", "🗃️ Full Player Database",
+        "🛡️ League Teams", "🗃️ Full Player Database", "🎮 QTCG Desk",
+        "🧢 Draft Room", "🗂 My QTCG Binder", "🎁 Open Packs",
     ]:
         st.button(label, key=f"mobile_{label}", on_click=_go_to_page,
                   args=(label,), use_container_width=True)
@@ -1977,6 +3154,9 @@ if view_mode == "📝 Register":
     st.stop()
 if view_mode == "🗂 My QTCG Binder":
     render_qtcg_binder(current_user())
+    st.stop()
+if view_mode == "🎮 QTCG Desk":
+    render_qtcg_desk(current_user())
     st.stop()
 if view_mode == "Film Terminal":
     from qcl_film import render as render_film_room
@@ -2285,6 +3465,13 @@ def load_data():
 
 _loaded = load_data()
 if isinstance(_loaded, str):
+    if view_mode == "🧢 Draft Room":
+        st.warning(
+            "League stats are temporarily unavailable; the draft board can still "
+            "load, but stock values will show as unrated."
+        )
+        render_draft_room(current_user(), pd.DataFrame(), {"Google Sheet": "Unavailable"})
+        st.stop()
     st.error(f"⚠️ DATA ERROR: {_loaded}")
     st.stop()
 
@@ -2292,6 +3479,9 @@ if isinstance(_loaded, str):
 full_df = _loaded['df']
 DATA_HEALTH = _loaded['health']
 
+if view_mode == "🧢 Draft Room":
+    render_draft_room(current_user(), full_df, DATA_HEALTH)
+    st.stop()
 
 if full_df is None or full_df.empty:
     _closed_season_desk("No games are available in Google Sheets or the historical CSV yet. Season analytics are paused.")
@@ -3800,10 +4990,22 @@ def render_open_pack(user):
         return
 
     try:
+        snapshot = _qcl_binder_snapshot(user)
+        if not snapshot.get("entry"):
+            st.info("No QCL account is saved for this Discord login yet. Claim a starter pack first.")
+            return
         balance = _qtcg_api_request("GET", "/balance", user)
         binder = _qtcg_api_request("POST", "/binder", user)
     except Exception as exc:
         st.error(f"Could not load the shared QTCG account: {exc}")
+        return
+    mismatch = _qtcg_snapshot_mismatch(snapshot, balance, binder)
+    if mismatch:
+        st.error(mismatch)
+        st.info(
+            "The binder can still be viewed from QCL, but pack writes stay paused until "
+            "Railway's GITHUB_TOKEN can read and write the QCL repository Contents."
+        )
         return
     cards_owned = binder.get("cards", [])
     try:
@@ -3836,6 +5038,7 @@ def render_open_pack(user):
         except Exception as exc:
             st.error(f"Pack was not opened: {exc}")
             return
+        _qcl_public_sources.clear()
         _rerun()
 
     pull_state = st.session_state.get("_qtcg_last_site_pull", {})
