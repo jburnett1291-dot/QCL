@@ -202,12 +202,17 @@ def _cookie_delete(name):
         pass
 
 
-def _clear_qcl_query_param():
-    """Remove only the login fallback, preserving unrelated query parameters."""
+def _remove_query_param(name):
+    """Remove one query parameter without discarding the others."""
     try:
-        st.query_params.pop("qcl", None)
+        st.query_params.pop(name, None)
     except Exception:
         pass
+
+
+def _clear_qcl_query_param():
+    """Remove only the login fallback, preserving unrelated query parameters."""
+    _remove_query_param("qcl")
 
 
 def _exchange_code(code):
@@ -257,13 +262,18 @@ def restore_session():
         return
 
     # 1. Returning from Discord with ?code=...
+    # If a valid signed fallback is already present, restore it instead of
+    # attempting to exchange a one-time OAuth code a second time.
     code = params.get("code")
-    if code:
+    url_tok = params.get("qcl")
+    if isinstance(url_tok, (list, tuple)):
+        url_tok = url_tok[0] if url_tok else None
+    url_payload = _verify(url_tok) if url_tok else None
+    if code and not url_payload:
         code_str = code if isinstance(code, str) else code[0]
-        
-        # CLEAR THE CODE IMMEDIATELY so it never loops or tries to reuse a dead code
-        st.query_params.clear()
-        
+
+        # Exchange the one-time code before changing the URL. Clearing query
+        # parameters here can interrupt a Streamlit rerun before the exchange.
         user = _exchange_code(code_str)
         if user:
             u = {"id": user.get("id"), "username": user.get("username"),
@@ -283,8 +293,10 @@ def restore_session():
             else:
                 st.session_state.pop("_qcl_cookie_probe", None)
                 st.session_state["_qcl_cookie_fallback"] = True
+            _remove_query_param("code")
             _rerun()
         else:
+            _remove_query_param("code")
             st.error("🚨 Discord Login Failed! Check that your Client ID, Client Secret, and Redirect URI match perfectly in Streamlit Cloud Secrets.")
             st.stop()
         return
@@ -299,6 +311,8 @@ def restore_session():
                 "id": payload["id"], "username": payload["name"],
                 "global_name": payload["name"], "avatar": payload.get("avatar")}
             st.session_state["auth_expires_at"] = payload["exp"]
+            if params.get("code"):
+                _remove_query_param("code")
             if params.get("qcl"):
                 if cookie_tok == tok:
                     st.session_state.pop("_qcl_cookie_fallback", None)
