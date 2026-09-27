@@ -1,11 +1,5 @@
 {
   "qcl_registrations": {
-    "0870a3a483b19f55ec264165": {
-      "registration_id": "0870a3a483b19f55ec264165",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
-    },
     "2f87e4d925a320c58697af0e": {
       "registration_id": "2f87e4d925a320c58697af0e",
       "role": "byot_gm",
@@ -18,12 +12,6 @@
       "status": "approved",
       "team_name": "kdsfkasdjfkjfls"
     },
-    "3cb08697927ee5a656b4f369": {
-      "registration_id": "3cb08697927ee5a656b4f369",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
     "3f9f452c5cd6ec0f6a19b303": {
       "registration_id": "3f9f452c5cd6ec0f6a19b303",
       "role": "byot_gm",
@@ -32,6 +20,18 @@
     },
     "412e171f7e39ad7945c2b406": {
       "registration_id": "412e171f7e39ad7945c2b406",
+      "role": "byot_gm",
+      "status": "approved",
+      "team_name": "kdsfkasdjfkjfls"
+    },
+    "4408052181c8c09760bd2d87": {
+      "registration_id": "4408052181c8c09760bd2d87",
+      "role": "byot_gm",
+      "status": "approved",
+      "team_name": "ads"
+    },
+    "55bbc788a2ab66fba999fd06": {
+      "registration_id": "55bbc788a2ab66fba999fd06",
       "role": "byot_gm",
       "status": "approved",
       "team_name": "kdsfkasdjfkjfls"
