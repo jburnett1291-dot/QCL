@@ -1,100 +1,64 @@
 {
   "qcl_registrations": {
-    "2f87e4d925a320c58697af0e": {
-      "registration_id": "2f87e4d925a320c58697af0e",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
+    "QCL-1790089885-59609-106": {
+      "people": [
+        {
+          "availability": "All day cst",
+          "discord_tag": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "display_name": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "gamertag_or_psn": "QwikTelevision",
+          "platform": "Xbox",
+          "position": "Pg",
+          "socials": [
+            "TikTok",
+            "Twitch",
+            "X"
+          ]
+        }
+      ],
+      "registration_id": "QCL-1790089885-59609-106",
+      "role": "draft_player",
+      "status": "submitted",
+      "team_name": ""
     },
-    "33967cd17c54209557538123": {
-      "registration_id": "33967cd17c54209557538123",
+    "QCL-1790204218-59609-716": {
+      "people": [
+        {
+          "availability": "",
+          "discord_tag": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "display_name": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "gamertag_or_psn": "sds",
+          "platform": "sdss",
+          "position": "",
+          "socials": []
+        }
+      ],
+      "registration_id": "QCL-1790204218-59609-716",
       "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
+      "status": "draft",
+      "team_name": "dsd"
     },
-    "3f9f452c5cd6ec0f6a19b303": {
-      "registration_id": "3f9f452c5cd6ec0f6a19b303",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
-    "412e171f7e39ad7945c2b406": {
-      "registration_id": "412e171f7e39ad7945c2b406",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
-    "4408052181c8c09760bd2d87": {
-      "registration_id": "4408052181c8c09760bd2d87",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
-    },
-    "55bbc788a2ab66fba999fd06": {
-      "registration_id": "55bbc788a2ab66fba999fd06",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
-    "568133742a45c301a92b01c8": {
-      "registration_id": "568133742a45c301a92b01c8",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
-    },
-    "83df8f90f6db62e2665593b4": {
-      "registration_id": "83df8f90f6db62e2665593b4",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
-    "a1588f6cf66e198e955ee62c": {
-      "registration_id": "a1588f6cf66e198e955ee62c",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
-    "b1bf40ced52ba73bafc109d1": {
-      "registration_id": "b1bf40ced52ba73bafc109d1",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
-    },
-    "b5cdbc97b42756968e91f955": {
-      "registration_id": "b5cdbc97b42756968e91f955",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
-    },
-    "bc63fa989025639f000127ee": {
-      "registration_id": "bc63fa989025639f000127ee",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
-    },
-    "d75422f32c40ce93925de4fa": {
-      "registration_id": "d75422f32c40ce93925de4fa",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
-    },
-    "e63759df58feeeddc64684a4": {
-      "registration_id": "e63759df58feeeddc64684a4",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
-    "e779f30a2933306d69a66612": {
-      "registration_id": "e779f30a2933306d69a66612",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "kdsfkasdjfkjfls"
-    },
-    "fd1814ad0f11d37449c0e0ac": {
-      "registration_id": "fd1814ad0f11d37449c0e0ac",
-      "role": "byot_gm",
-      "status": "approved",
-      "team_name": "ads"
+    "QCL-1790527166-59609-392": {
+      "people": [
+        {
+          "availability": "asdfasd",
+          "discord_tag": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "display_name": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "gamertag_or_psn": "fdfa",
+          "platform": "PlayStation",
+          "position": "PG",
+          "socials": [
+            "Instagram",
+            "TikTok",
+            "YouTube",
+            "X/Twitter"
+          ]
+        }
+      ],
+      "registration_id": "QCL-1790527166-59609-392",
+      "role": "draft_player",
+      "status": "review",
+      "team_name": ""
     }
   },
   "schema_version": 1
