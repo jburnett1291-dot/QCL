@@ -103,6 +103,8 @@ import streamlit.components.v1 as components
 #        QCL_SAVE_API_URL = "https://diligent-eagerness-test-9422.up.railway.app"
 #     QCL_SIGNING_SECRET must match the value configured on the QTCG Railway service.
 #     QCL_SAVE_API_SECRET is not used by the current QTCG API.
+#     On QTCG Railway, set GITHUB_REPO = "jburnett1291-dot/QCL".
+#     Keep SAVE_PATH = "fantasy_save.json" and POOL_PATH = "fantasy_market.json".
 #
 #  The league pages remain public without Discord setup. Cookie persistence
 #  is optional; the old manager is incompatible with current Streamlit.
@@ -688,6 +690,7 @@ def _submit_streamlit_registration(payload, uploads):
 
 
 _QTCG_API_DEFAULT = "https://diligent-eagerness-test-9422.up.railway.app"
+_QCL_SOURCE_REPO = "jburnett1291-dot/QCL"
 
 
 def _qtcg_api_base():
@@ -699,6 +702,32 @@ def _qtcg_api_base():
     if not base.startswith("https://"):
         raise RuntimeError("QCL_SAVE_API_URL must be an HTTPS URL.")
     return base
+
+
+def _qtcg_assert_source_repo(api_base):
+    """Fail closed unless the API is reading/writing the QCL source-of-truth repo."""
+    try:
+        response = requests.get(
+            f"{api_base}/api/health",
+            headers={"Accept": "application/json"},
+            timeout=8,
+        )
+        health = response.json()
+    except requests.RequestException as exc:
+        raise RuntimeError("Could not verify the QTCG API's GitHub source repository.") from exc
+    except ValueError as exc:
+        raise RuntimeError("The QTCG API returned an invalid health response.") from exc
+
+    if not response.ok or not isinstance(health, dict):
+        raise RuntimeError("The QTCG API health check failed; binder and pack actions are paused.")
+    actual_repo = str(health.get("repo") or "").strip()
+    if actual_repo != _QCL_SOURCE_REPO:
+        shown_repo = actual_repo or "unknown"
+        raise RuntimeError(
+            f"The QTCG API currently reads and writes {shown_repo}, not the QCL source of truth. "
+            f"Set GITHUB_REPO={_QCL_SOURCE_REPO} on the QTCG Railway service and restart it. "
+            "The expected data files are fantasy_save.json and fantasy_market.json."
+        )
 
 
 def _qtcg_session_token(user):
@@ -728,6 +757,7 @@ def _qtcg_api_request(method, path, user, payload=None):
     if method not in {"GET", "POST"} or not path.startswith("/"):
         raise ValueError("Unsupported QTCG API request.")
     base = _qtcg_api_base()
+    _qtcg_assert_source_repo(base)
     token = _qtcg_session_token(user)
     url = f"{base}/api{path}"
     data = dict(payload or {})
