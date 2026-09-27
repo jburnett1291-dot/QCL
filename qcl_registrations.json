@@ -59,6 +59,28 @@
       "role": "draft_player",
       "status": "review",
       "team_name": ""
+    },
+    "QCL-1790527289-59609-395": {
+      "people": [
+        {
+          "availability": "asdfasd",
+          "discord_tag": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "display_name": "𝘚𝘵𝘦𝘱𝘩𝘦𝘯 𝘈. 𝘘𝘸𝘪𝘬",
+          "gamertag_or_psn": "fdfa",
+          "platform": "PlayStation",
+          "position": "PG",
+          "socials": [
+            "Instagram",
+            "TikTok",
+            "YouTube",
+            "X/Twitter"
+          ]
+        }
+      ],
+      "registration_id": "QCL-1790527289-59609-395",
+      "role": "draft_player",
+      "status": "review",
+      "team_name": ""
     }
   },
   "schema_version": 1
