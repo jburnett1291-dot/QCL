@@ -8,12 +8,13 @@ Data source : Google Sheet (CSV export) — Type='Total' rows are source of trut
 Run         : streamlit run qcl_hub.py
 
 
-v3.3 CHANGELOG
+v3.4 CHANGELOG
 --------------
 * DRAFT ROOM      : live Railway draft board, authenticated picks, commissioner
-                    controls, approved-registration pool sync, and a live stats-based
-                    stock overlay. Stock uses the existing Impact Load formula;
-                    draft order setup remains outside the current API.
+                    controls, approved GM/team and player sync, configurable
+                    commissioner setup (8-round default, snake order, adjustable
+                    clock), and stats-based stock written as rank_score. Requires
+                    the companion Railway /api/draft/setup patch.
 
 
 v3.2 CHANGELOG
@@ -1440,9 +1441,11 @@ def _draft_player_id(player, fallback=""):
 
 
 def _draft_player_rating(player):
-    for key in ("ovr", "overall", "rating", "rank_score"):
+    for key in ("rank_score", "ovr", "overall", "rating"):
         try:
-            return float(player.get(key, 0) or 0)
+            value = player.get(key)
+            if value is not None and value != "":
+                return float(value)
         except (TypeError, ValueError):
             continue
     return 0.0
@@ -1451,12 +1454,21 @@ def _draft_player_rating(player):
 def _draft_player_label(player):
     name = str(player.get("gamertag") or player.get("name") or "Unnamed prospect")
     position = str(player.get("position") or "")
-    rating = _draft_player_rating(player)
     parts = [name]
     if position:
         parts.append(position)
-    if rating:
-        parts.append(f"OVR {rating:g}")
+    for key in ("ovr", "overall", "rating"):
+        try:
+            rating = float(player.get(key))
+            parts.append(f"OVR {rating:g}")
+            break
+        except (TypeError, ValueError):
+            continue
+    try:
+        stock = float(player.get("rank_score"))
+        parts.append(f"Stock {stock:.0f}")
+    except (TypeError, ValueError):
+        pass
     return " · ".join(parts)
 
 
@@ -1575,6 +1587,78 @@ def _draft_approved_registration_players():
     return sorted(players.values(), key=lambda player: player["gamertag"].casefold())
 
 
+def _draft_approved_registration_teams():
+    """Return one approved Draft GM registration per unique team and owner."""
+    teams_by_key = {}
+    owners_seen = {}
+    problems = []
+    for record in _official_records():
+        if record.get("role") != "draft_gm":
+            continue
+        team = str(record.get("team_name") or "").strip()[:80]
+        owner_id = str(record.get("owner_id") or "").strip()
+        if not team or not owner_id.isdigit():
+            problems.append(
+                f"Skipped a Draft GM registration with a missing team name or valid owner ID."
+            )
+            continue
+        team_key = team.casefold()
+        if team_key in teams_by_key:
+            problems.append(f"Duplicate approved team name: {team}.")
+            continue
+        if owner_id in owners_seen:
+            problems.append(
+                f"Discord GM {owner_id} is assigned to both "
+                f"{owners_seen[owner_id]} and {team}."
+            )
+            continue
+        teams_by_key[team_key] = (team, owner_id)
+        owners_seen[owner_id] = team
+
+    ordered = sorted(teams_by_key.values(), key=lambda item: item[0].casefold())
+    teams = [team for team, _ in ordered]
+    coaches = {team: owner_id for team, owner_id in ordered}
+    return teams, coaches, problems
+
+
+def _draft_name_key(name):
+    try:
+        return name_match_key(str(name or ""))
+    except Exception:
+        return re.sub(r"[^a-z0-9]+", "", str(name or "").casefold())
+
+
+def _draft_players_with_stock(players, stock_by_name, season_label=None):
+    """Attach the latest QCL stock percentile for Railway auto-pick ranking."""
+    enriched = []
+    for raw in players:
+        player = dict(raw)
+        stock = stock_by_name.get(_draft_name_key(player.get("gamertag")))
+        if stock:
+            player["rank_score"] = round(float(stock["Stock"]), 4)
+            player["stock_impact_load"] = round(float(stock["Impact Load"]), 4)
+            player["stock_recent_delta"] = round(float(stock["Recent Δ"]), 4)
+            player["stock_season"] = str(season_label or "")
+        enriched.append(player)
+    return enriched
+
+
+def _draft_build_order(teams, rounds):
+    """Build a numbered snake order for commissioner preview."""
+    order = []
+    pick_number = 1
+    for round_number in range(1, int(rounds) + 1):
+        round_teams = teams if round_number % 2 else list(reversed(teams))
+        for team in round_teams:
+            order.append({
+                "pick": pick_number,
+                "round": round_number,
+                "team": team,
+            })
+            pick_number += 1
+    return order
+
+
 def _draft_store_result(user, result, message):
     updated = result.get("draft")
     uid = str((user or {}).get("id", ""))
@@ -1664,8 +1748,8 @@ def render_draft_room(user, stats_df=None, stats_health=None):
     st.caption(
         "Live draft stock is the latest available QCL-season percentile of the Hub’s existing "
         "Impact Load formula (PTS + 1.5×AST + REB + 2×(STL + BLK)); recent change "
-        "compares the last three games with the season average. It updates on sheet "
-        "refresh and is not written back to the draft JSON."
+        "compares the last three games with the season average. Commissioner pool sync "
+        "writes that percentile as rank_score so Railway auto-picks can use the same stock."
     )
 
     notice = st.session_state.pop("_qcl_draft_notice", None)
@@ -1862,18 +1946,35 @@ def render_draft_room(user, stats_df=None, stats_health=None):
         "Railway re-checks commissioner permissions for every write. "
         "These controls change the shared QCL draft state."
     )
-    with st.expander("Sync approved player registrations"):
+    approved_players = _draft_approved_registration_players()
+    approved_teams, approved_coaches, team_sync_problems = (
+        _draft_approved_registration_teams()
+    )
+    with st.expander("Sync approved registrations and live stock"):
         if st.button(
             "Refresh approved registration list",
             key="qcl_draft_refresh_registrations",
         ):
             _public_registration_export.clear()
             _rerun()
-        approved_players = _draft_approved_registration_players()
         st.caption(
-            "Only approved Draft Player registrations are included; GM registrations, "
-            "availability, proof files, and social details are excluded."
+            "The prospect pool uses approved Draft Player registrations only. "
+            "Approved Draft GM registrations provide one team-to-GM mapping per team. "
+            "Availability, proof files, and social details are excluded."
         )
+        st.metric("Approved draft GMs / teams", len(approved_teams))
+        if team_sync_problems:
+            for problem in team_sync_problems:
+                st.warning(problem)
+        if approved_teams:
+            st.dataframe(
+                [{
+                    "Team": team,
+                    "GM Discord ID": approved_coaches[team],
+                } for team in approved_teams],
+                hide_index=True,
+                use_container_width=True,
+            )
         if approved_players:
             st.dataframe(
                 [{
@@ -1884,35 +1985,182 @@ def render_draft_room(user, stats_df=None, stats_health=None):
                 use_container_width=True,
             )
             registration_confirm = st.checkbox(
-                f"I confirm syncing these {len(approved_players)} approved players "
-                "into the shared draft pool.",
+                f"I confirm syncing {len(approved_players)} approved players and "
+                f"{len(approved_teams)} approved GM teams. Current QCL stock scores "
+                "will be written to the pool.",
                 key="qcl_draft_registration_sync_confirm",
             )
             if st.button(
-                "Sync approved registrations to pool",
+                "Refresh stats + sync players, teams, and stock",
                 disabled=not registration_confirm,
                 key="qcl_draft_registration_sync",
             ):
-                try:
-                    result = _qtcg_api_request(
-                        "POST",
-                        "/draft/players",
-                        user,
-                        {"players": approved_players},
+                if team_sync_problems:
+                    st.error(
+                        "Fix duplicate or invalid approved Draft GM registrations "
+                        "before syncing the team map."
                     )
-                except Exception as exc:
-                    st.error(f"Registration sync failed: {exc}")
+                elif not approved_teams:
+                    st.error("No approved Draft GM teams are available to sync.")
                 else:
-                    _draft_store_result(
-                        user,
-                        result,
-                        f"Synced {result.get('synced', 0)} approved draft registrations.",
-                    )
+                    latest_stats_result = None
+                    try:
+                        load_data.clear()
+                        latest_stats_result = load_data()
+                    except Exception as exc:
+                        st.error(
+                            f"Stats refresh failed; pool was not synced: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    if isinstance(latest_stats_result, dict):
+                        refreshed_stats = latest_stats_result.get("df", pd.DataFrame())
+                        refreshed_health = latest_stats_result.get("health", {})
+                        refreshed_stock, refreshed_season = _draft_stock_index(
+                            refreshed_stats
+                        )
+                        synced_players = _draft_players_with_stock(
+                            approved_players, refreshed_stock, refreshed_season
+                        )
+                        syncing_team_map = status in {"setup", "stopped"} and not picks
+                        sync_payload = {"players": synced_players}
+                        if syncing_team_map:
+                            sync_payload["teams"] = approved_teams
+                            sync_payload["coaches"] = approved_coaches
+                        try:
+                            result = _qtcg_api_request(
+                                "POST", "/draft/players", user, sync_payload
+                            )
+                        except Exception as exc:
+                            st.error(f"Registration and stock sync failed: {exc}")
+                        else:
+                            count_with_stock = sum(
+                                "rank_score" in player for player in synced_players
+                            )
+                            message = (
+                                f"Synced {result.get('synced', 0)} approved players; "
+                                f"{count_with_stock} received live stock scores"
+                                + (
+                                    f" for QCL season {refreshed_season}."
+                                    if refreshed_season else "."
+                                )
+                            )
+                            if not syncing_team_map:
+                                message += (
+                                    " Existing team mappings were left unchanged "
+                                    "because the draft has picks or is already scheduled."
+                                )
+                            if isinstance(refreshed_health, dict):
+                                sheet_status = refreshed_health.get("Google Sheet")
+                                if sheet_status:
+                                    message += f" Stats feed: {sheet_status}."
+                            _draft_store_result(user, result, message)
+                    else:
+                        st.error(
+                            "Stats refresh did not return usable sheet data; "
+                            "the draft pool was not synced."
+                        )
         else:
             st.info(
                 "No approved Draft Player registrations with a valid Discord ID "
                 "and gamertag are available to sync."
             )
+    if status in {"setup", "stopped"} and not picks:
+        with st.expander("Configure draft order", expanded=not order):
+            current_pool_count = len(available)
+            max_rounds = (
+                current_pool_count // len(approved_teams)
+                if approved_teams else 0
+            )
+            st.caption(
+                "One GM per approved Draft GM team. The order is snake by default; "
+                "rounds start at 8 and are limited by the number of synced eligible "
+                "prospects."
+            )
+            st.write(
+                f"Teams: **{len(approved_teams)}** · Eligible prospects in Railway: "
+                f"**{current_pool_count}** · Maximum complete rounds: **{max_rounds}**"
+            )
+            if team_sync_problems:
+                st.error("Resolve the approved GM registration issues before setup.")
+            if not approved_teams:
+                st.info("Approve Draft GM registrations before configuring the order.")
+            elif current_pool_count < len(approved_teams):
+                st.info(
+                    "Sync enough approved Draft Player registrations first to cover "
+                    "at least one complete round."
+                )
+            else:
+                rounds_default = min(8, max_rounds)
+                round_count = st.number_input(
+                    "Number of rounds",
+                    min_value=1,
+                    max_value=max_rounds,
+                    value=rounds_default,
+                    step=1,
+                    key=f"qcl_draft_rounds_{len(approved_teams)}_{current_pool_count}",
+                )
+                pick_seconds = st.number_input(
+                    "Seconds per pick",
+                    min_value=15,
+                    max_value=300,
+                    value=60,
+                    step=15,
+                    key="qcl_draft_pick_seconds",
+                )
+                preview_order = _draft_build_order(
+                    approved_teams, int(round_count)
+                )
+                st.caption(
+                    f"Preview: {len(preview_order)} total picks · "
+                    f"{max(0, current_pool_count - len(preview_order))} prospects "
+                    "left after the scheduled rounds."
+                )
+                st.dataframe(
+                    preview_order[:15],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                setup_confirm = st.checkbox(
+                    "I confirm replacing the current setup with this team map, "
+                    "round count, and snake order.",
+                    key="qcl_draft_setup_confirm",
+                )
+                if st.button(
+                    "Save draft setup",
+                    type="primary",
+                    disabled=(
+                        not setup_confirm
+                        or bool(team_sync_problems)
+                        or len(preview_order) > current_pool_count
+                    ),
+                    key="qcl_draft_setup_submit",
+                ):
+                    try:
+                        result = _qtcg_api_request(
+                            "POST",
+                            "/draft/setup",
+                            user,
+                            {
+                                "teams": approved_teams,
+                                "coaches": approved_coaches,
+                                "rounds": int(round_count),
+                                "pick_seconds": int(pick_seconds),
+                                "snake": True,
+                            },
+                        )
+                    except Exception as exc:
+                        st.error(
+                            "Draft setup was not saved. If Railway reports a 404, "
+                            "apply the companion Railway setup patch first. "
+                            f"Details: {exc}"
+                        )
+                    else:
+                        _draft_store_result(
+                            user,
+                            result,
+                            f"Saved {len(approved_teams)} teams, {int(round_count)} "
+                            f"snake rounds, and a {int(pick_seconds)}-second pick clock.",
+                        )
     if status in {"setup", "scheduled", "stopped"}:
         if order:
             if st.button("Start draft now", key="qcl_draft_start"):
