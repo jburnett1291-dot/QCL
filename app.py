@@ -110,9 +110,10 @@ import streamlit.components.v1 as components
 #        DISCORD_REDIRECT_URI = "https://your-hub.streamlit.app"
 #        QCL_SIGNING_SECRET = "a-unique-random-secret-of-at-least-32-characters"
 #        QCL_SAVE_API_URL = "https://diligent-eagerness-test-9422.up.railway.app"
-#     QCL_SIGNING_SECRET must match the value configured on the QTCG Railway service.
+#     ADMIN_PIN must match the commissioner's chosen PIN for the bot.
+#     QCL_SIGNING_SECRET must match the value configured on the Railway API service.
 #     QCL_SAVE_API_SECRET is not used by the current QTCG API.
-#     On QTCG Railway, set GITHUB_REPO = "jburnett1291-dot/QCL".
+#     On Railway, set GITHUB_REPO = "jburnett1291-dot/QCL".
 #     Keep SAVE_PATH = "fantasy_save.json" and POOL_PATH = "fantasy_market.json".
 #
 #  The league pages remain public without Discord setup. Cookie persistence
@@ -761,11 +762,168 @@ def _qtcg_session_token(user):
     return f"{body}.{signature}"
 
 
+_QCL_DRAFT_PIN_FAILURES = {}
+_QCL_DRAFT_PIN_LOCKOUTS = {}
+_QCL_DRAFT_PIN_WINDOW_SECONDS = 600
+_QCL_DRAFT_PIN_MAX_ATTEMPTS = 3
+_QCL_DRAFT_PIN_LOCKOUT_SECONDS = 1800
+_QCL_DRAFT_PIN_UNLOCK_SECONDS = 900
+
+
+def _qcl_draft_pin_keys(user_id):
+    uid = str(user_id)
+    return (
+        f"_qcl_draft_pin_until_{uid}",
+        f"_qcl_draft_pin_input_{uid}",
+        f"_qcl_draft_pin_error_{uid}",
+    )
+
+
+def _qcl_draft_pin_unlocked(user):
+    uid = str((user or {}).get("id", "")).strip()
+    if not uid.isdigit():
+        return False
+    unlock_key, _, _ = _qcl_draft_pin_keys(uid)
+    unlocked_until = st.session_state.get(unlock_key)
+    if isinstance(unlocked_until, (int, float)) and unlocked_until > time.time():
+        return True
+    st.session_state.pop(unlock_key, None)
+    return False
+
+
+def _qcl_draft_submit_pin(user_id):
+    uid = str(user_id)
+    unlock_key, input_key, error_key = _qcl_draft_pin_keys(uid)
+    now = time.time()
+    expected = str(_cfg("ADMIN_PIN", "") or "").strip()
+    supplied = str(st.session_state.get(input_key, "") or "")
+    locked_until = _QCL_DRAFT_PIN_LOCKOUTS.get(uid, 0)
+
+    if not expected:
+        st.session_state[error_key] = "ADMIN_PIN is not configured for this Streamlit service."
+    elif locked_until > now:
+        remaining = max(1, int(locked_until - now))
+        st.session_state[error_key] = f"Commissioner PIN is locked. Try again in {remaining} seconds."
+    else:
+        recent = [
+            stamp for stamp in _QCL_DRAFT_PIN_FAILURES.get(uid, [])
+            if isinstance(stamp, (int, float))
+            and now - stamp < _QCL_DRAFT_PIN_WINDOW_SECONDS
+        ]
+        if hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+            st.session_state[unlock_key] = now + _QCL_DRAFT_PIN_UNLOCK_SECONDS
+            st.session_state.pop(error_key, None)
+            _QCL_DRAFT_PIN_FAILURES.pop(uid, None)
+            _QCL_DRAFT_PIN_LOCKOUTS.pop(uid, None)
+        else:
+            recent.append(now)
+            if len(recent) >= _QCL_DRAFT_PIN_MAX_ATTEMPTS:
+                _QCL_DRAFT_PIN_LOCKOUTS[uid] = now + _QCL_DRAFT_PIN_LOCKOUT_SECONDS
+                _QCL_DRAFT_PIN_FAILURES.pop(uid, None)
+                st.session_state[error_key] = (
+                    "Too many incorrect attempts. Commissioner controls are locked "
+                    "for 30 minutes."
+                )
+            else:
+                _QCL_DRAFT_PIN_FAILURES[uid] = recent
+                st.session_state[error_key] = (
+                    f"PIN not accepted ({len(recent)}/{_QCL_DRAFT_PIN_MAX_ATTEMPTS} attempts)."
+                )
+
+    st.session_state[input_key] = ""
+
+
+def _qcl_draft_admin_pin_gate(user):
+    uid = str((user or {}).get("id", "")).strip()
+    if not uid.isdigit():
+        st.error("The signed-in Discord account could not be identified.")
+        return False
+
+    unlock_key, input_key, error_key = _qcl_draft_pin_keys(uid)
+    now = time.time()
+    if _qcl_draft_pin_unlocked(user):
+        st.caption(
+            "Commissioner PIN accepted. Controls relock in 15 minutes; Railway "
+            "still verifies commissioner permissions for every write."
+        )
+        if st.button("Lock commissioner controls", key=f"qcl_draft_pin_lock_{uid}"):
+            st.session_state.pop(unlock_key, None)
+            _rerun()
+        return True
+
+    expected = str(_cfg("ADMIN_PIN", "") or "").strip()
+    if not expected:
+        st.error(
+            "Commissioner controls are locked because ADMIN_PIN is not configured "
+            "for this Streamlit service."
+        )
+        return False
+
+    locked_until = _QCL_DRAFT_PIN_LOCKOUTS.get(uid, 0)
+    if locked_until > now:
+        remaining = max(1, int(locked_until - now))
+        st.error(
+            f"Commissioner PIN is temporarily locked after repeated failures. "
+            f"Try again in {remaining} seconds."
+        )
+        return False
+    if locked_until:
+        _QCL_DRAFT_PIN_LOCKOUTS.pop(uid, None)
+
+    recent = [
+        stamp for stamp in _QCL_DRAFT_PIN_FAILURES.get(uid, [])
+        if isinstance(stamp, (int, float))
+        and now - stamp < _QCL_DRAFT_PIN_WINDOW_SECONDS
+    ]
+    _QCL_DRAFT_PIN_FAILURES[uid] = recent
+    st.subheader("Commissioner PIN")
+    st.caption(
+        "Enter the bot's ADMIN_PIN to unlock commissioner controls for 15 minutes. "
+        "Coach pick access is unchanged."
+    )
+    with st.form(f"qcl_draft_pin_form_{uid}"):
+        st.text_input(
+            "Admin PIN",
+            type="password",
+            max_chars=128,
+            key=input_key,
+        )
+        st.form_submit_button(
+            "Unlock commissioner controls",
+            on_click=_qcl_draft_submit_pin,
+            args=(uid,),
+        )
+    error = st.session_state.get(error_key)
+    if error:
+        st.error(str(error))
+    return False
+
+
 def _qtcg_api_request(method, path, user, payload=None):
     """Call the live QTCG API server-side; never expose its signed session to JS."""
     method = method.upper()
     if method not in {"GET", "POST"} or not path.startswith("/"):
         raise ValueError("Unsupported QTCG API request.")
+    if method == "POST" and path in {
+        "/draft/state", "/draft/setup", "/draft/action", "/draft/players"
+    }:
+        uid = str((user or {}).get("id", "")).strip()
+        cached = st.session_state.get("_qcl_draft_cache")
+        cached_draft = (
+            cached.get("draft")
+            if isinstance(cached, dict) and cached.get("uid") == uid
+            else None
+        )
+        access = str(cached_draft.get("access") or "") if isinstance(cached_draft, dict) else ""
+        coach_pick = (
+            path == "/draft/action"
+            and str((payload or {}).get("action") or "") == "pick"
+            and access == "coach"
+        )
+        if not coach_pick and not _qcl_draft_pin_unlocked(user):
+            raise RuntimeError(
+                "Unlock commissioner controls with the PIN before submitting this change."
+            )
     base = _qtcg_api_base()
     _qtcg_assert_source_repo(base)
     token = _qtcg_session_token(user)
@@ -785,8 +943,8 @@ def _qtcg_api_request(method, path, user, payload=None):
         result = {}
     if response.status_code == 401:
         raise RuntimeError(
-            "QTCG rejected the Hub session. QCL_SIGNING_SECRET must match the value "
-            "configured on the QTCG Railway service."
+            "Railway rejected the Hub session. QCL_SIGNING_SECRET must match the "
+            "value configured on the Railway API service."
         )
     if not response.ok:
         detail = result.get("error") if isinstance(result, dict) else ""
@@ -1684,7 +1842,8 @@ def render_draft_room(user, stats_df=None, stats_health=None):
     st.title("🧢 Draft Room")
     st.caption(
         "Live QCL draft state and picks are handled by the existing Railway service. "
-        "Your Discord session determines whether you can view, coach, or commission."
+        "Discord determines player, coach, or commissioner access; a short-lived PIN "
+        "additionally unlocks commissioner controls."
     )
     if not user:
         st.info("Log in with Discord to view the shared draft board.")
@@ -1847,10 +2006,14 @@ def render_draft_room(user, stats_df=None, stats_health=None):
         else:
             st.caption("No pick slots are configured.")
 
+    admin_pin_ok = False
+    if access == "admin":
+        admin_pin_ok = _qcl_draft_admin_pin_gate(user)
+
     can_pick = bool(
         status == "active" and current_turn
         and (
-            access == "admin"
+            (access == "admin" and admin_pin_ok)
             or (access == "coach" and my_team and my_team == current_team)
         )
     )
@@ -1858,6 +2021,8 @@ def render_draft_room(user, stats_df=None, stats_health=None):
         with st.expander("Make a pick", expanded=can_pick):
             if not current_turn or status != "active":
                 st.info("The draft must be active and have a current pick.")
+            elif access == "admin" and not admin_pin_ok:
+                st.info("Unlock commissioner controls above before recording an admin pick.")
             elif not can_pick:
                 st.info(
                     f"{current_team or 'The current team'} is on the clock. "
@@ -1938,7 +2103,7 @@ def render_draft_room(user, stats_df=None, stats_health=None):
             use_container_width=True,
         )
 
-    if access != "admin":
+    if access != "admin" or not admin_pin_ok:
         return
 
     st.subheader("Commissioner controls")
