@@ -4893,7 +4893,7 @@ async def _qcl_reg_import_streamlit_webhook(message):
     owner_id = str(payload.get("owner_id") or "")
     if (
         payload.get("version") != 1
-        or role not in {"draft_player", "byot_gm"}
+        or role not in {"draft_player", "draft_gm", "byot_gm"}
         or not owner_id.isdigit()
     ):
         print("[QCLReg] Rejected Streamlit intake with invalid role or owner.")
