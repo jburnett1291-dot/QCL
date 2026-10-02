@@ -2562,7 +2562,7 @@ def render_draft_room(user, stats_df=None, stats_health=None):
 def _render_registration():
     st.title("📝 League Registration")
     st.caption(
-        "Register as a Draft Player or BYOT GM. Submissions go to the same "
+        "Register as a Draft Player, Draft GM, or BYOT GM. Submissions go to the same "
         "private Discord review queue used by the bot."
     )
     user = current_user()
@@ -2573,13 +2573,17 @@ def _render_registration():
     st.success(f"Discord linked as {user.get('global_name') or user.get('username')}")
     role_label = st.radio(
         "Registration type",
-        ["Draft Player", "BYOT GM"],
+        ["Draft Player", "Draft GM", "BYOT GM"],
         horizontal=True,
         key="registration_type",
     )
-    role = "draft_player" if role_label == "Draft Player" else "byot_gm"
+    role = {
+        "Draft Player": "draft_player",
+        "Draft GM": "draft_gm",
+        "BYOT GM": "byot_gm",
+    }[role_label]
     with st.form("qcl_streamlit_registration", clear_on_submit=False):
-        if role == "byot_gm":
+        if role in {"byot_gm", "draft_gm"}:
             team_name = st.text_input("Team name *", max_chars=80)
             team_logo = st.file_uploader(
                 "Team logo *", type=["png", "jpg", "jpeg", "webp"],
@@ -2589,11 +2593,16 @@ def _render_registration():
             team_name, team_logo = "", None
         gamertag = st.text_input("Your gamertag or PSN *", max_chars=80)
         platform = st.selectbox("Platform *", ["PlayStation", "Xbox", "PC", "Other"])
-        position = st.selectbox("Position *", ["PG", "SG", "SF", "PF", "C", "Utility"])
-        availability = st.text_area(
-            "Availability *", max_chars=500,
-            placeholder="Days, times, and time zone",
-        )
+        position = ""
+        availability = ""
+        if role != "draft_gm":
+            position = st.selectbox(
+                "Position *", ["PG", "SG", "SF", "PF", "C", "Utility"]
+            )
+            availability = st.text_area(
+                "Availability *", max_chars=500,
+                placeholder="Days, times, and time zone",
+            )
         socials = st.multiselect(
             "Social platforms shown in your proof",
             ["Instagram", "TikTok", "YouTube", "X/Twitter"],
@@ -2659,15 +2668,16 @@ def _render_registration():
     errors = []
     if not gamertag.strip():
         errors.append("your gamertag")
-    if not availability.strip():
+    if role != "draft_gm" and not availability.strip():
         errors.append("availability")
     if not owner_proof:
         errors.append("your social proof")
-    if role == "byot_gm":
+    if role in {"byot_gm", "draft_gm"}:
         if not team_name.strip():
             errors.append("team name")
         if team_logo is None:
             errors.append("team logo")
+    if role == "byot_gm":
         if not roster:
             errors.append("at least one roster player")
         for number, player in enumerate(roster, 1):
