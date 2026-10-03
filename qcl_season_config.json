@@ -13,5 +13,20 @@
     "season_label": "QCL Season One",
     "sheet_tab": "Raw Data"
   },
-  "closed_seasons": []
+  "closed_seasons": [],
+  "pending_rollover": {
+    "game_edition": "2K26",
+    "season_number": 1,
+    "season_label": "QCL Season One",
+    "csv_path": "archives/seasons/2k26/qcl-season-one.csv",
+    "closed_at": "2026-10-03T14:21:37.114Z",
+    "row_count": 794,
+    "csv_sha256": "6ffa4ae649b35db0f5c9060e59ee9bfe52b907102c71c1588fadcf5bfaa7da91",
+    "next": {
+      "game_edition": "2K27",
+      "season_number": 1,
+      "season_label": "QCL Season One",
+      "sheet_tab": "Raw Data"
+    }
+  }
 }
