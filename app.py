@@ -392,9 +392,20 @@ def _login_url():
 
 def login_widget(key="sidebar"):
     """Login button, or a 'logged in as' chip with logout."""
-    if not all(_cfg(k) for k in ("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET",
-                                  "DISCORD_REDIRECT_URI")) or len(_cfg("QCL_SIGNING_SECRET")) < 32:
-        st.caption("Optional Discord linking is unavailable until its OAuth settings and signing secret are configured.")
+    missing = [
+        name for name in (
+            "DISCORD_CLIENT_ID",
+            "DISCORD_CLIENT_SECRET",
+            "DISCORD_REDIRECT_URI",
+        )
+        if not _cfg(name)
+    ]
+    if len(_cfg("QCL_SIGNING_SECRET")) < 32:
+        missing.append("QCL_SIGNING_SECRET (32+ characters)")
+    if missing:
+        st.caption(
+            "Discord sign-in is unavailable. Configure: " + ", ".join(missing) + "."
+        )
         return
     u = current_user()
     if u:
@@ -957,6 +968,157 @@ def _qtcg_api_request(method, path, user, payload=None):
     if not isinstance(result, dict):
         raise RuntimeError("The QTCG API returned an invalid response.")
     return result
+
+
+def _commissioner_status_for(user):
+    uid = str((user or {}).get("id") or "").strip()
+    if not uid:
+        return False, None
+    cached = st.session_state.get("_qcl_commissioner_status")
+    if (
+        isinstance(cached, dict)
+        and cached.get("uid") == uid
+        and cached.get("expires_at", 0) > time.time()
+    ):
+        return bool(cached.get("is_commissioner")), cached.get("error")
+    try:
+        result = _qtcg_api_request("GET", "/commissioner/status", user)
+        is_commissioner = bool(result.get("is_commissioner"))
+        error = None
+    except (RuntimeError, requests.RequestException, ValueError) as exc:
+        is_commissioner = False
+        error = str(exc)
+    st.session_state["_qcl_commissioner_status"] = {
+        "uid": uid,
+        "expires_at": time.time() + 20,
+        "is_commissioner": is_commissioner,
+        "error": error,
+    }
+    return is_commissioner, error
+
+
+def _commissioner_registration_records(data):
+    if not isinstance(data, dict):
+        return []
+    records = data.get("qcl_registrations", data)
+    if isinstance(records, dict):
+        return [
+            (str(record_id), record)
+            for record_id, record in records.items()
+            if isinstance(record, dict)
+        ]
+    if isinstance(records, list):
+        return [
+            (str(index + 1), record)
+            for index, record in enumerate(records)
+            if isinstance(record, dict)
+        ]
+    return []
+
+
+def _render_commissioner_desk(user):
+    st.title("Commissioner Desk")
+    st.caption(
+        "Read-only review of QTCG draft files and QCL registration records. "
+        "Commissioner access is verified by the QTCG server."
+    )
+    try:
+        payload = _qtcg_api_request("GET", "/commissioner/data", user)
+    except (RuntimeError, requests.RequestException, ValueError) as exc:
+        st.error(f"Commissioner data could not be loaded: {exc}")
+        return
+
+    draft_files = payload.get("draft_files") or []
+    registrations = payload.get("qcl_registrations") or {}
+    legacy = payload.get("legacy_registrations") or {}
+    if not isinstance(draft_files, list):
+        draft_files = []
+    if not isinstance(registrations, dict):
+        registrations = {}
+    if not isinstance(legacy, dict):
+        legacy = {}
+
+    draft_tab, registration_tab, legacy_tab = st.tabs(
+        ["QTCG Draft Files", "QCL Registrations", "Legacy Registrations"]
+    )
+    with draft_tab:
+        st.caption(f"{len(draft_files)} player and coach files")
+        kind_filter = st.selectbox(
+            "Show draft files",
+            ["All files", "Player files", "Coach files"],
+            key="qcl_commissioner_draft_kind",
+        )
+        selected_kind = {
+            "Player files": "player",
+            "Coach files": "coach",
+        }.get(kind_filter)
+        visible_files = [
+            item for item in draft_files
+            if isinstance(item, dict)
+            and (selected_kind is None or item.get("kind") == selected_kind)
+        ]
+        if not visible_files:
+            st.info("No matching draft files were found.")
+        for index, item in enumerate(visible_files):
+            path = str(item.get("path") or "Unnamed file")
+            size = int(item.get("size") or 0)
+            label = f"{'Coach' if item.get('kind') == 'coach' else 'Player'} · {path}"
+            with st.expander(label, expanded=False):
+                st.caption(f"{size:,} bytes")
+                text = item.get("text")
+                if isinstance(text, str):
+                    if path.lower().endswith(".json"):
+                        try:
+                            st.json(json.loads(text))
+                        except json.JSONDecodeError:
+                            st.code(text)
+                    else:
+                        st.code(text)
+                else:
+                    st.info(str(item.get("preview_note") or "Preview unavailable."))
+                url = item.get("url")
+                if isinstance(url, str) and url.startswith("https://github.com/"):
+                    st.link_button(
+                        "Open in GitHub",
+                        url,
+                        key=f"qcl_commissioner_draft_file_{index}",
+                    )
+
+    with registration_tab:
+        records = _commissioner_registration_records(registrations)
+        st.caption(f"{len(records)} registration records")
+        statuses = sorted({
+            str(record.get("status") or "unknown")
+            for _, record in records
+        })
+        status_filter = st.selectbox(
+            "Filter registrations",
+            ["All statuses"] + statuses,
+            key="qcl_commissioner_registration_status",
+        )
+        visible_records = [
+            (record_id, record)
+            for record_id, record in records
+            if status_filter == "All statuses"
+            or str(record.get("status") or "unknown") == status_filter
+        ]
+        for record_id, record in visible_records:
+            name = (
+                record.get("team_name")
+                or record.get("gamertag")
+                or record.get("name")
+                or record_id
+            )
+            role = str(record.get("role") or "role not set")
+            status = str(record.get("status") or "unknown")
+            with st.expander(f"{name} · {role} · {status}", expanded=False):
+                st.json(record)
+        if not records:
+            st.info("No QCL registrations were found.")
+
+    with legacy_tab:
+        st.caption("Read-only snapshot of the legacy registration export.")
+        st.json(legacy)
 
 
 def _qtcg_image_url(api_base, image):
@@ -2726,6 +2888,7 @@ def _render_registration():
 restore_session()
 _viewer = current_user()
 _viewer_access = _access(_viewer)
+_commissioner_access, _commissioner_access_error = _commissioner_status_for(_viewer)
 
 
 
@@ -3525,6 +3688,10 @@ if _viewer_access["role"] == "gm":
     VIEWS.insert(3, "🏢 GM Desk")
 elif _viewer_access["role"] == "player":
     VIEWS.insert(3, "👥 Players Desk")
+if _commissioner_access:
+    VIEWS.insert(3, "Commissioner Desk")
+if st.session_state.get("qcl_nav") not in VIEWS:
+    st.session_state["qcl_nav"] = VIEWS[0]
 st.sidebar.caption("EXPLORE")
 view_mode = st.sidebar.radio("Navigation", VIEWS, label_visibility="collapsed", key="qcl_nav")
 try:
@@ -3532,6 +3699,13 @@ try:
 except Exception as exc:
     st.sidebar.error(f"Discord login display failed: {type(exc).__name__}: {exc}")
 st.sidebar.divider()
+st.sidebar.markdown(
+    '<a href="/qtcg" style="color:#d4af37;font-weight:700;'
+    'text-decoration:none;">Open QTCG Activity</a>',
+    unsafe_allow_html=True,
+)
+if _commissioner_access_error:
+    st.sidebar.caption("Commissioner access could not be verified.")
 if os.path.exists("Logo.png"):
     st.sidebar.image("Logo.png", width=140)
 
@@ -3568,6 +3742,9 @@ if view_mode == "📱 Mobile Hub":
     elif _viewer_access["role"] == "player":
         st.button("👥 Players Desk", on_click=_go_to_page, args=("👥 Players Desk",),
                   use_container_width=True)
+    if _commissioner_access:
+        st.button("Commissioner Desk", on_click=_go_to_page,
+                  args=("Commissioner Desk",), use_container_width=True)
     st.stop()
 if view_mode == "📰 News & Updates":
     st.button("📱 Open Mobile Hub", on_click=_go_to_page,
@@ -3576,6 +3753,12 @@ if view_mode == "📰 News & Updates":
     st.stop()
 if view_mode == "📝 Register":
     _render_registration()
+    st.stop()
+if view_mode == "Commissioner Desk":
+    if not _commissioner_access:
+        st.error("Commissioner access could not be verified.")
+    else:
+        _render_commissioner_desk(_viewer)
     st.stop()
 if view_mode == "🗂 My QTCG Binder":
     render_qtcg_binder(current_user())
