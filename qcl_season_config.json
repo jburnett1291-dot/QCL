@@ -1,32 +1,29 @@
 {
   "schema_version": 1,
   "active": {
-    "spreadsheet_id": "1rksLYUcXQJ03uTacfIBD6SRsvtH-IE6djqT-LINwcH4",
-    "sheet_tab": "Raw Data",
-    "game_edition": "2K26",
-    "season_number": 1,
-    "season_label": "QCL Season One"
-  },
-  "next": {
     "game_edition": "2K27",
     "season_number": 1,
     "season_label": "QCL Season One",
-    "sheet_tab": "Raw Data"
+    "sheet_tab": "Raw Data",
+    "spreadsheet_id": "1rksLYUcXQJ03uTacfIBD6SRsvtH-IE6djqT-LINwcH4",
+    "sheet_gid": 0
   },
-  "closed_seasons": [],
-  "pending_rollover": {
-    "game_edition": "2K26",
-    "season_number": 1,
-    "season_label": "QCL Season One",
-    "csv_path": "archives/seasons/2k26/qcl-season-one.csv",
-    "closed_at": "2026-10-03T14:21:37.114Z",
-    "row_count": 794,
-    "csv_sha256": "6ffa4ae649b35db0f5c9060e59ee9bfe52b907102c71c1588fadcf5bfaa7da91",
-    "next": {
-      "game_edition": "2K27",
+  "next": {
+    "game_edition": "2K27",
+    "season_number": 2,
+    "season_label": "QCL Season 2",
+    "sheet_tab": "Raw Data",
+    "sheet_gid": 0,
+    "spreadsheet_id": "1rksLYUcXQJ03uTacfIBD6SRsvtH-IE6djqT-LINwcH4"
+  },
+  "closed_seasons": [
+    {
+      "game_edition": "2K26",
       "season_number": 1,
       "season_label": "QCL Season One",
-      "sheet_tab": "Raw Data"
+      "csv_path": "archives/seasons/2k26/qcl-season-one.csv",
+      "closed_at": "2026-10-03T14:21:37.114Z",
+      "row_count": 794
     }
-  }
+  ]
 }
