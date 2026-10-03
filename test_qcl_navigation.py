@@ -1,6 +1,8 @@
 import ast
+import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 APP_PATH = Path(__file__).with_name("app.py")
@@ -221,6 +223,149 @@ class QclNavigationContractTests(unittest.TestCase):
             assignment_found,
             "Commissioner navigation must use server-verified access status.",
         )
+
+
+def _function_named(tree, name):
+    return next(
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
+    )
+
+
+class QclActivitySessionBridgeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = APP_PATH.read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.source, filename=str(APP_PATH))
+        cls.bridge = _function_named(cls.tree, "_publish_activity_session")
+        cls.closed_season = _function_named(cls.tree, "_closed_season_desk")
+
+    def _run_function(self, function, namespace):
+        module = ast.Module(body=[function], type_ignores=[])
+        exec(compile(module, str(APP_PATH), "exec"), namespace)
+
+    def test_verified_user_receives_a_signed_session_in_same_origin_storage(self):
+        writes = []
+        components = SimpleNamespace(
+            html=lambda markup, **kwargs: writes.append((markup, kwargs))
+        )
+        namespace = {
+            "components": components,
+            "json": json,
+            "st": SimpleNamespace(session_state={}),
+            "_qtcg_session_token": lambda user: "signed-session",
+        }
+        self._run_function(self.bridge, namespace)
+
+        namespace["_publish_activity_session"]({"id": "123"})
+        self.assertEqual(len(writes), 1)
+        markup, kwargs = writes[0]
+        self.assertIn("window.parent.localStorage", markup)
+        self.assertIn('storage.setItem("qcl-session", session)', markup)
+        self.assertIn(json.dumps("signed-session"), markup)
+        self.assertEqual(kwargs["height"], 0)
+
+    def test_anonymous_page_does_not_erase_an_existing_activity_session(self):
+        writes = []
+        namespace = {
+            "components": SimpleNamespace(
+                html=lambda markup, **kwargs: writes.append(markup)
+            ),
+            "json": json,
+            "st": SimpleNamespace(session_state={}),
+            "_qtcg_session_token": lambda user: self.fail("anonymous users get no token"),
+        }
+        self._run_function(self.bridge, namespace)
+
+        namespace["_publish_activity_session"](None)
+        self.assertEqual(writes, [])
+
+    def test_explicit_sign_out_clears_the_shared_activity_session(self):
+        writes = []
+        state = {"_qtcg_activity_session_clear": True}
+        namespace = {
+            "components": SimpleNamespace(
+                html=lambda markup, **kwargs: writes.append(markup)
+            ),
+            "json": json,
+            "st": SimpleNamespace(session_state=state),
+            "_qtcg_session_token": lambda user: self.fail("sign-out must not mint a token"),
+        }
+        self._run_function(self.bridge, namespace)
+
+        namespace["_publish_activity_session"](None)
+        self.assertEqual(len(writes), 1)
+        self.assertIn('localStorage.removeItem("qcl-session")', writes[0])
+        self.assertNotIn("_qtcg_activity_session_clear", state)
+
+    def test_expired_and_logged_out_streamlit_sessions_schedule_activity_cleanup(self):
+        self.assertIn(
+            'st.session_state["_qtcg_activity_session_clear"] = True',
+            self.source,
+        )
+        restore = _function_named(self.tree, "restore_session")
+        login = _function_named(self.tree, "login_widget")
+        expired_branch = next(
+            node for node in ast.walk(restore)
+            if isinstance(node, ast.If)
+            and "auth_expires_at" in ast.unparse(node.test)
+        )
+        logout_branch = next(
+            node for node in ast.walk(login)
+            if isinstance(node, ast.If)
+            and "Log out" in ast.unparse(node.test)
+        )
+        for branch in (expired_branch, logout_branch):
+            self.assertTrue(
+                any(
+                    isinstance(node, ast.Assign)
+                    and "_qtcg_activity_session_clear" in ast.unparse(node.targets)
+                    for node in ast.walk(branch)
+                )
+            )
+
+    def test_no_stats_screen_explains_coming_soon_and_keeps_member_access(self):
+        calls = []
+        namespace = {
+            "st": SimpleNamespace(
+                warning=lambda message: calls.append(("warning", message)),
+                info=lambda message: calls.append(("info", message)),
+                caption=lambda message: calls.append(("caption", message)),
+            ),
+            "_access": lambda user: {"role": "guest"},
+            "current_user": lambda: None,
+            "_gm_desk": lambda access: calls.append(("desk", access)),
+            "login_widget": lambda **kwargs: calls.append(("login", kwargs)),
+        }
+        self._run_function(self.closed_season, namespace)
+
+        namespace["_closed_season_desk"]("No games have been posted yet.")
+        self.assertIn(("warning", "No games have been posted yet."), calls)
+        coming_soon = next(message for kind, message in calls if kind == "info")
+        self.assertIn("Coming soon", coming_soon)
+        self.assertIn("Public pages, registration", coming_soon)
+        self.assertIn(("login", {"key": "empty_season"}), calls)
+
+    def test_registered_member_keeps_their_desk_when_no_stats_are_posted(self):
+        calls = []
+        access = {"role": "gm", "team_records": [{"team_name": "Example"}]}
+        namespace = {
+            "st": SimpleNamespace(
+                warning=lambda message: calls.append(("warning", message)),
+                info=lambda message: calls.append(("info", message)),
+                caption=lambda message: calls.append(("caption", message)),
+            ),
+            "_access": lambda user: access,
+            "current_user": lambda: {"id": "123"},
+            "_gm_desk": lambda member_access: calls.append(("desk", member_access)),
+            "login_widget": lambda **kwargs: calls.append(("login", kwargs)),
+        }
+        self._run_function(self.closed_season, namespace)
+
+        namespace["_closed_season_desk"]("No games have been posted yet.")
+        self.assertIn(("desk", access), calls)
+        self.assertFalse(any(kind == "login" for kind, _ in calls))
 
 
 if __name__ == "__main__":
