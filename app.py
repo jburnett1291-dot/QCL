@@ -298,6 +298,7 @@ def restore_session():
     if st.session_state.get("discord_user") and st.session_state.get("auth_expires_at", 0) <= time.time():
         st.session_state.pop("discord_user", None)
         st.session_state.pop("auth_expires_at", None)
+        st.session_state["_qtcg_activity_session_clear"] = True
     if st.session_state.get("discord_user") and not params.get("code"):
         return
 
@@ -423,6 +424,7 @@ def login_widget(key="sidebar"):
             st.session_state.pop("_qcl_cookie_probe", None)
             st.session_state.pop("_qcl_cookie_fallback", None)
             st.session_state.pop("_qcl_cookie_write_attempted", None)
+            st.session_state["_qtcg_activity_session_clear"] = True
             if _cookie_get("qcl"):
                 _cookie_delete("qcl")
             st.query_params.clear()
@@ -657,7 +659,10 @@ def _gm_desk(access):
 
 def _closed_season_desk(reason):
     st.warning(reason)
-    st.info("Season analytics are paused. Registered members can still use their desk.")
+    st.info(
+        "Coming soon: season stats will appear after games are posted. "
+        "Public pages, registration, and approved member desks remain available."
+    )
     access = _access(current_user())
     if access["role"] in {"gm", "player"}:
         _gm_desk(access)
@@ -773,6 +778,43 @@ def _qtcg_session_token(user):
     ).decode("ascii").rstrip("=")
     signature = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).hexdigest()[:16]
     return f"{body}.{signature}"
+
+
+def _publish_activity_session(user):
+    """Share the verified Streamlit identity with QTCG's same-origin Activity pages."""
+    if st.session_state.pop("_qtcg_activity_session_clear", False):
+        bridge_html = """<script>
+(() => {
+  try {
+    window.parent.localStorage.removeItem("qcl-session");
+  } catch (error) {
+    document.body.textContent = "QCL sign-out could not clear the Activity session.";
+    try { window.frameElement.style.height = "32px"; } catch (_) {}
+  }
+})();
+</script>"""
+        components.html(bridge_html, height=0)
+        return
+
+    if not user:
+        return
+
+    session_literal = json.dumps(_qtcg_session_token(user))
+    bridge_html = f"""<script>
+(() => {{
+  try {{
+    const storage = window.parent.localStorage;
+    const session = {session_literal};
+    if (storage.getItem("qcl-session") !== session) {{
+      storage.setItem("qcl-session", session);
+    }}
+  }} catch (error) {{
+    document.body.textContent = "QCL sign-in could not reach the Activity session store. Reopen this Activity and try again.";
+    try {{ window.frameElement.style.height = "32px"; }} catch (_) {{}}
+  }}
+}})();
+</script>"""
+    components.html(bridge_html, height=0)
 
 
 _QCL_DRAFT_PIN_FAILURES = {}
@@ -2887,6 +2929,7 @@ def _render_registration():
 # Discord linking is optional for browsing the public league pages.
 restore_session()
 _viewer = current_user()
+_publish_activity_session(_viewer)
 _viewer_access = _access(_viewer)
 _commissioner_access, _commissioner_access_error = _commissioner_status_for(_viewer)
 
