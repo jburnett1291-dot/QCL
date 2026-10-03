@@ -101,6 +101,45 @@ def _inserted_page_labels(node):
     return labels
 
 
+
+def _role_navigation_branch(tree):
+    for node in tree.body:
+        test = getattr(node, "test", None)
+        if (
+            isinstance(node, ast.If)
+            and isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Subscript)
+            and isinstance(test.left.value, ast.Name)
+            and test.left.value.id == "_viewer_access"
+        ):
+            return node
+    raise AssertionError("app.py must define role-specific navigation")
+
+
+def _commissioner_navigation_branch(tree):
+    for node in tree.body:
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "_commissioner_access"
+        ):
+            return node
+    raise AssertionError("app.py must define commissioner navigation")
+
+
+def _build_navigation(tree, role="", commissioner_access=False):
+    namespace = {
+        "VIEWS": list(_view_list(tree)),
+        "_viewer_access": {"role": role},
+        "_commissioner_access": commissioner_access,
+    }
+    branches = ast.Module(
+        body=[_role_navigation_branch(tree), _commissioner_navigation_branch(tree)],
+        type_ignores=[],
+    )
+    exec(compile(branches, str(APP_PATH), "exec"), namespace)
+    return namespace["VIEWS"]
+
 class QclNavigationContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -129,6 +168,59 @@ class QclNavigationContractTests(unittest.TestCase):
                 self.assertNotIn(page, self.pages)
                 self.assertIn(required_condition, conditional_pages.get(page, []))
                 self.assertIn(page, _view_mode_dispatch_labels(self.tree))
+
+
+    def test_role_navigation_keeps_existing_pages_for_every_viewer(self):
+        default_views = _build_navigation(self.tree)
+        player_views = _build_navigation(self.tree, role="player")
+        gm_views = _build_navigation(self.tree, role="gm")
+
+        self.assertNotIn("Commissioner Desk", default_views)
+        self.assertNotIn("🏢 GM Desk", default_views)
+        self.assertNotIn("👥 Players Desk", default_views)
+        self.assertIn("👥 Players Desk", player_views)
+        self.assertNotIn("🏢 GM Desk", player_views)
+        self.assertIn("🏢 GM Desk", gm_views)
+        self.assertNotIn("👥 Players Desk", gm_views)
+        for views in (default_views, player_views, gm_views):
+            retained = [page for page in views if page not in ROLE_PAGES]
+            self.assertEqual(retained, EXPECTED_PAGES)
+
+    def test_commissioner_page_is_added_only_for_verified_access(self):
+        denied = _build_navigation(
+            self.tree, role="player", commissioner_access=False
+        )
+        allowed = _build_navigation(
+            self.tree, role="player", commissioner_access=True
+        )
+
+        self.assertNotIn("Commissioner Desk", denied)
+        self.assertEqual(allowed.count("Commissioner Desk"), 1)
+        self.assertIn("👥 Players Desk", allowed)
+        self.assertEqual(
+            [page for page in allowed if page not in ROLE_PAGES],
+            EXPECTED_PAGES,
+        )
+
+    def test_commissioner_visibility_uses_server_verified_status(self):
+        assignment_found = any(
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Tuple)
+            and [item.id for item in node.targets[0].elts if isinstance(item, ast.Name)]
+            == ["_commissioner_access", "_commissioner_access_error"]
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "_commissioner_status_for"
+            and len(node.value.args) == 1
+            and isinstance(node.value.args[0], ast.Name)
+            and node.value.args[0].id == "_viewer"
+            for node in ast.walk(self.tree)
+        )
+        self.assertTrue(
+            assignment_found,
+            "Commissioner navigation must use server-verified access status.",
+        )
 
 
 if __name__ == "__main__":
