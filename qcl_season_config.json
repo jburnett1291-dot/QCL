@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "active": {
+    "spreadsheet_id": "1rksLYUcXQJ03uTacfIBD6SRsvtH-IE6djqT-LINwcH4",
+    "sheet_tab": "Raw Data",
+    "game_edition": "2K26",
+    "season_number": 1,
+    "season_label": "QCL Season One"
+  },
+  "next": {
+    "game_edition": "2K27",
+    "season_number": 1,
+    "season_label": "QCL Season One",
+    "sheet_tab": "Raw Data"
+  },
+  "closed_seasons": []
+}

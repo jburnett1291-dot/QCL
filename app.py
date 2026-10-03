@@ -73,8 +73,10 @@ st.markdown("""
 
 
 SHEET_ID = "1rksLYUcXQJ03uTacfIBD6SRsvtH-IE6djqT-LINwcH4"
-URL = os.environ.get("QCL_CSV_URL",
-                     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv")
+QCL_RAW_BASE = "https://raw.githubusercontent.com/jburnett1291-dot/QCL/main"
+QCL_SEASON_CONFIG_URL = os.environ.get(
+    "QCL_SEASON_CONFIG_URL", f"{QCL_RAW_BASE}/qcl_season_config.json"
+)
 
 
 GOLD, SILVER, BRONZE = "#d4af37", "#a0a0a0", "#cd7f32"
@@ -3617,18 +3619,125 @@ def load_data():
         from io import StringIO
         frames = []
         health = {}
+        manifest = {}
+        active = {}
+        config_loaded = False
         try:
-            response = requests.get(URL, timeout=12)
+            response = _hub_requests.get(QCL_SEASON_CONFIG_URL, timeout=8)
             response.raise_for_status()
-            live = pd.read_csv(StringIO(response.text))
-            live.columns = live.columns.str.strip()
-            if {'Player/Team', 'Team Name', 'Season', 'Game_ID', 'Type'}.issubset(live.columns):
-                frames.append(live)
-                health['Google Sheet'] = 'Available'
-            else:
-                health['Google Sheet'] = 'No usable game rows'
-        except (requests.RequestException, pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeError):
-            health['Google Sheet'] = 'Offline / season pending'
+            manifest = response.json()
+            active = manifest.get("active") if isinstance(manifest, dict) else {}
+            if not isinstance(active, dict):
+                active = {}
+            config_loaded = bool(active.get("spreadsheet_id"))
+            health["Season Config"] = (
+                "Available" if config_loaded else "Missing active workbook settings"
+            )
+        except (_hub_requests.RequestException, ValueError):
+            health["Season Config"] = "Unavailable; live QCL stats paused"
+
+        active_edition = str(active.get("game_edition") or "").strip()
+        active_season_number = active.get("season_number")
+        try:
+            active_season_number = int(active_season_number)
+        except (TypeError, ValueError):
+            active_season_number = None
+
+        data_api_url = os.environ.get("QCL_DATA_API_URL", "").strip()
+        legacy_csv_url = os.environ.get("QCL_CSV_URL", "").strip()
+        if config_loaded or legacy_csv_url or data_api_url:
+            try:
+                if data_api_url:
+                    response = _hub_requests.get(data_api_url, timeout=12)
+                    response.raise_for_status()
+                    payload = response.json()
+                    if not isinstance(payload, dict) or payload.get("ok") is not True:
+                        detail = payload.get("error", "Invalid QCL data API response") if isinstance(payload, dict) else "Invalid QCL data API response"
+                        raise ValueError(str(detail))
+                    api_headers = payload.get("headers") or []
+                    api_rows = payload.get("rows") or []
+                    if not isinstance(api_headers, list) or not isinstance(api_rows, list):
+                        raise ValueError("QCL data API returned an invalid row shape")
+                    api_active = payload.get("active")
+                    if isinstance(api_active, dict):
+                        active_edition = str(
+                            api_active.get("game_edition") or active_edition
+                        ).strip()
+                        try:
+                            active_season_number = int(
+                                api_active.get("season_number")
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                    live = pd.DataFrame(api_rows, columns=api_headers or None)
+                    health["QCL Data API"] = "Available"
+                else:
+                    live_url = legacy_csv_url
+                    if not live_url:
+                        live_url = (
+                            "https://docs.google.com/spreadsheets/d/"
+                            + str(active["spreadsheet_id"])
+                            + "/export?format=csv"
+                        )
+                    response = _hub_requests.get(live_url, timeout=12)
+                    response.raise_for_status()
+                    live = pd.read_csv(StringIO(response.text))
+                live.columns = live.columns.str.strip()
+                if {'Player/Team', 'Team Name', 'Season', 'Game_ID', 'Type'}.issubset(live.columns):
+                    if "Game Edition" not in live.columns and active_edition:
+                        live["Game Edition"] = active_edition
+                        health["Game Edition"] = (
+                            "Derived from active config; add the sheet column before season close"
+                        )
+                    frames.append(live)
+                    if not data_api_url:
+                        health['Google Sheet'] = 'Available'
+                else:
+                    health['Google Sheet' if not data_api_url else 'QCL Data API'] = 'No usable game rows'
+            except (_hub_requests.RequestException, pd.errors.EmptyDataError,
+                    pd.errors.ParserError, UnicodeError, ValueError):
+                health['QCL Data API' if data_api_url else 'Google Sheet'] = 'Offline / season pending'
+        else:
+            health["Google Sheet"] = "Unavailable because season config is not loaded"
+
+        archives = manifest.get("closed_seasons", []) if isinstance(manifest, dict) else []
+        if not isinstance(archives, list):
+            archives = []
+        archives_loaded = 0
+        for archive in archives:
+            if not isinstance(archive, dict):
+                continue
+            csv_path = str(archive.get("csv_path") or "").strip()
+            if (
+                not csv_path.startswith("archives/seasons/")
+                or ".." in csv_path.split("/")
+                or not csv_path.lower().endswith(".csv")
+            ):
+                continue
+            try:
+                response = _hub_requests.get(
+                    f"{QCL_RAW_BASE}/{csv_path}", timeout=10
+                )
+                response.raise_for_status()
+                archived = pd.read_csv(StringIO(response.text))
+                archived.columns = archived.columns.str.strip()
+                if "Game Edition" not in archived.columns:
+                    archive_edition = str(archive.get("game_edition") or "").strip()
+                    if not archive_edition:
+                        raise ValueError("Archive has no Game Edition metadata")
+                    archived["Game Edition"] = archive_edition
+                if {'Player/Team', 'Team Name', 'Season', 'Game_ID', 'Type'}.issubset(archived.columns):
+                    frames.append(archived)
+                    archives_loaded += 1
+            except (_hub_requests.RequestException, ValueError,
+                    pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeError):
+                continue
+        if archives:
+            health["QCL season archives"] = (
+                f"{archives_loaded} of {len(archives)} loaded"
+            )
+        else:
+            health["QCL season archives"] = "None yet"
 
         # --- merge SPAM history (Seasons 1-6) if the CSV is in the repo ---
         try:
@@ -3651,16 +3760,34 @@ def load_data():
                             _sp["Season"] = pd.to_numeric(_sp["Season"], errors="coerce") + 100
                         _sp = _sp[_sp["Season"].notna()]
                         if not _sp.empty:
+                            if "Game Edition" not in _sp.columns:
+                                _sp["Game Edition"] = "Unspecified"
                             frames.append(_sp)
                             health['Historical CSV'] = os.path.basename(_sp_path)
                             break
                 except (OSError, ValueError, pd.errors.ParserError, pd.errors.EmptyDataError):
                     health['Historical CSV'] = 'Unreadable'
         if not frames:
-            return {'df': pd.DataFrame(), 'health': health}
+            return {
+                'df': pd.DataFrame(),
+                'health': health,
+                'active_edition': active_edition,
+                'active_season': active_season_number,
+            }
         df = pd.concat(frames, ignore_index=True)
         if df.empty:
-            return {'df': df, 'health': health}
+            return {
+                'df': df,
+                'health': health,
+                'active_edition': active_edition,
+                'active_season': active_season_number,
+            }
+        if "Game Edition" not in df.columns:
+            df["Game Edition"] = "Unspecified"
+        df["Game Edition"] = (
+            df["Game Edition"].fillna("Unspecified").astype(str).str.strip()
+        )
+        df.loc[df["Game Edition"] == "", "Game Edition"] = "Unspecified"
         df = df[df['Player/Team'] != 'Player/Team']
         df = df[df['Team Name'].notna()
                 & (df['Team Name'].astype(str).str.strip() != '')
@@ -3716,7 +3843,11 @@ def load_data():
         pre = len(df)
         df = df[df['Game_ID'].notna() & (df['Season'] > 0)]
         health['Rows dropped (no Game_ID/Season)'] = pre - len(df)
-        df['GKey'] = df['Season'].astype(int).astype(str) + '-' + df['Game_ID'].astype(int).astype(str)
+        df['GKey'] = (
+            df['Game Edition'].astype(str) + '-'
+            + df['Season'].astype(int).astype(str) + '-'
+            + df['Game_ID'].astype(int).astype(str)
+        )
         df['Era'] = np.where(df['Season'] >= 100, 'SPAM', 'QCL')
 
 
@@ -3724,7 +3855,7 @@ def load_data():
         pre = len(df)
         df['_bulk'] = df['PTS'] + df['FGA'] + df['REB']
         df = (df.sort_values('_bulk')
-                .drop_duplicates(subset=['Season', 'Game_ID', 'Team Name', 'Player/Team', 'Type'], keep='last')
+                .drop_duplicates(subset=['Game Edition', 'Season', 'Game_ID', 'Team Name', 'Player/Team', 'Type'], keep='last')
                 .drop(columns='_bulk')
                 .sort_index())
         health['Duplicate rows removed'] = pre - len(df)
@@ -3744,7 +3875,8 @@ def load_data():
 
 
         # --- TEAM TOTALS: recorded preferred; rebuilt from players as fallback ---
-        key = ['Season', 'Game_ID', 'Team Name']
+        game_key = ['Game Edition', 'Season', 'Game_ID']
+        key = game_key + ['Team Name']
         players = df[df['Type'] == 'Player'].copy()
         recorded = df[df['Type'] == 'Team'].copy()
         recorded = recorded[recorded['PTS'] > 0].drop_duplicates(subset=key, keep='last')
@@ -3779,9 +3911,9 @@ def load_data():
 
 
         # --- WIN RECONCILIATION: fill missing Win from head-to-head score ---
-        n_teams = team_rows.groupby(['Season', 'Game_ID'])['Team Name'].transform('nunique')
-        max_pts = team_rows.groupby(['Season', 'Game_ID'])['PTS'].transform('max')
-        min_pts = team_rows.groupby(['Season', 'Game_ID'])['PTS'].transform('min')
+        n_teams = team_rows.groupby(game_key)['Team Name'].transform('nunique')
+        max_pts = team_rows.groupby(game_key)['PTS'].transform('max')
+        min_pts = team_rows.groupby(game_key)['PTS'].transform('min')
         derived = pd.Series(np.where((n_teams == 2) & (max_pts != min_pts),
                                      (team_rows['PTS'] == max_pts).astype(float), np.nan),
                             index=team_rows.index)
@@ -3798,7 +3930,7 @@ def load_data():
 
         # --- ADVANCED RATINGS (PER GAME) ---
         p_mask = df['Type'].astype(str).str.lower() == 'player'
-        team_poss = df[p_mask].groupby(['Season', 'Game_ID', 'Team Name'])['Poss_Raw'].transform('sum')
+        team_poss = df[p_mask].groupby(key)['Poss_Raw'].transform('sum')
         df.loc[p_mask, 'USG_Game'] = np.where(team_poss > 0, df.loc[p_mask, 'Poss_Raw'] / team_poss * 100, 0)
         df['USG_Game'] = pd.to_numeric(df.get('USG_Game'), errors='coerce').fillna(0)
         df['ORtg_Game'] = np.where(df['Poss_Raw'] > 0, df['PTS'] / df['Poss_Raw'] * 100, 0)
@@ -3808,8 +3940,8 @@ def load_data():
         df['Game_Type'] = np.where(df['Game_ID'] >= 9000, 'Playoffs',
                                    np.where(df['Game_ID'] >= 8000, 'Tournament', 'Regular Season'))
         players_df = df[df['Type'].astype(str).str.lower() == 'player'].copy()
-        players_df = players_df.sort_values(by=['Season', 'Game_ID', 'Team Name'])
-        players_df['Position_Num'] = players_df.groupby(['Season', 'Game_ID', 'Team Name']).cumcount() + 1
+        players_df = players_df.sort_values(by=key)
+        players_df['Position_Num'] = players_df.groupby(key).cumcount() + 1
 
 
         players_df['Tipped_Passes'] = np.where(players_df['Position_Num'] <= 2,
@@ -3827,34 +3959,34 @@ def load_data():
         players_df['FB_Points'] = players_df[['FB_Points', 'PTS']].min(axis=1)
 
 
-        df = df.merge(players_df[['Season', 'Game_ID', 'Team Name', 'Player/Team',
+        df = df.merge(players_df[['Game Edition', 'Season', 'Game_ID', 'Team Name', 'Player/Team',
                                   'Tipped_Passes', 'Shots_Affected', 'FB_Points', 'Position_Num']],
-                      on=['Season', 'Game_ID', 'Team Name', 'Player/Team'], how='left')
+                      on=['Game Edition', 'Season', 'Game_ID', 'Team Name', 'Player/Team'], how='left')
         for c in ['Tipped_Passes', 'Shots_Affected', 'FB_Points', 'Position_Num']:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
 
         t_proxy = (df[df['Type'] == 'Player']
-                   .groupby(['Season', 'Game_ID', 'Team Name'])[['Tipped_Passes', 'Shots_Affected', 'FB_Points']]
+                   .groupby(key)[['Tipped_Passes', 'Shots_Affected', 'FB_Points']]
                    .sum().reset_index())
         for col in ['Tipped_Passes', 'Shots_Affected', 'FB_Points']:
             df.loc[df['Type'] == 'Team', col] = (df.loc[df['Type'] == 'Team']
-                                                 .set_index(['Season', 'Game_ID', 'Team Name']).index
-                                                 .map(t_proxy.set_index(['Season', 'Game_ID', 'Team Name'])[col])
+                                                 .set_index(key).index
+                                                 .map(t_proxy.set_index(key)[col])
                                                  ).fillna(0)
 
 
         # --- MATCHUP LOGIC & SOS ---
-        t_logs = df[df['Type'] == 'Team'][['Game_ID', 'Team Name', 'PTS', 'FGM', 'FGA', '3PM', '3PA',
+        t_logs = df[df['Type'] == 'Team'][['Game Edition', 'Game_ID', 'Team Name', 'PTS', 'FGM', 'FGA', '3PM', '3PA',
                                            'TO', 'FTA', 'Win', 'Season']].copy()
-        t_logs['Team_Win_Pct'] = t_logs.groupby(['Season', 'Team Name'])['Win'].transform('mean')
+        t_logs['Team_Win_Pct'] = t_logs.groupby(['Game Edition', 'Season', 'Team Name'])['Win'].transform('mean')
 
 
-        n_in_game = t_logs.groupby(['Season', 'Game_ID'])['Team Name'].transform('nunique')
+        n_in_game = t_logs.groupby(game_key)['Team Name'].transform('nunique')
         pairable = t_logs[n_in_game == 2]
-        opps = pd.merge(pairable, pairable, on=['Season', 'Game_ID'], suffixes=('', '_Opp'))
+        opps = pd.merge(pairable, pairable, on=game_key, suffixes=('', '_Opp'))
         opps = opps[opps['Team Name'] != opps['Team Name_Opp']]
-        opps = opps.drop_duplicates(subset=['Season', 'Game_ID', 'Team Name'])
+        opps = opps.drop_duplicates(subset=key)
 
 
         if not opps.empty:
@@ -3862,13 +3994,13 @@ def load_data():
             opps['Opp_Possessions'] = opps['FGA_Opp'] + (0.44 * opps['FTA_Opp']) + opps['TO_Opp']
             opps['Opp_PPP'] = np.where(opps['Opp_Possessions'] > 0, opps['PTS_Opp'] / opps['Opp_Possessions'], 0)
             opps['Opp_FG%'] = np.where(opps['FGA_Opp'] > 0, (opps['FGM_Opp'] / opps['FGA_Opp']) * 100, 0)
-            df = pd.merge(df, opps[['Season', 'Game_ID', 'Team Name', 'Point_Diff', 'Opp_PPP', 'Opp_FG%',
+            df = pd.merge(df, opps[['Game Edition', 'Season', 'Game_ID', 'Team Name', 'Point_Diff', 'Opp_PPP', 'Opp_FG%',
                                     'Team Name_Opp', 'Team_Win_Pct_Opp', 'PTS_Opp']],
-                          on=['Season', 'Game_ID', 'Team Name'], how='left')
+                          on=key, how='left')
             for src, dst in [('Point_Diff', 'Point_Diff'), ('Opp_PPP', 'Opp_PPP'),
                              ('Team_Win_Pct_Opp', 'SOS_Game'), ('Team Name_Opp', 'Opp_Name'),
                              ('PTS_Opp', 'Opp_PTS')]:
-                df[dst] = df.groupby(['Season', 'Game_ID', 'Team Name'])[src].transform('first')
+                df[dst] = df.groupby(key)[src].transform('first')
         else:
             # No pairable head-to-head games at all — still guarantee columns exist.
             df['Point_Diff'] = 0.0
@@ -3879,7 +4011,12 @@ def load_data():
             df['Opp_PTS'] = np.nan
 
 
-        return {'df': df, 'health': health}
+        return {
+            'df': df,
+            'health': health,
+            'active_edition': active_edition,
+            'active_season': active_season_number,
+        }
     except Exception as e:
         return f"{type(e).__name__}: {e}"
 
@@ -3899,7 +4036,8 @@ if isinstance(_loaded, str):
     st.stop()
 
 
-full_df = _loaded['df']
+all_editions_df = _loaded['df']
+full_df = all_editions_df
 DATA_HEALTH = _loaded['health']
 
 if view_mode == "🧢 Draft Room":
@@ -3944,7 +4082,6 @@ def build_clubs(df):
 
 
 
-player_clubs = build_clubs(full_df)
 
 
 
@@ -4969,21 +5106,81 @@ def toggle_watch(name):
 # =============================================================================
 # 7. SIDEBAR / NAV
 # =============================================================================
-seasons = sorted([int(s) for s in full_df['Season'].dropna().unique() if int(s) > 0], reverse=True)
-if not seasons:
-    _closed_season_desk("No seasons with valid game data were found. GM and registration tools remain open.")
-    st.stop()
-
-
 def _season_label(s):
     return f"SPAM S{s - 100}" if s >= 100 else f"S{s}"
 
 
+active_edition = str(_loaded.get("active_edition") or "").strip()
+known_editions = (
+    sorted(
+        {
+            str(value).strip()
+            for value in all_editions_df.get("Game Edition", pd.Series(dtype=str)).dropna()
+            if str(value).strip()
+        }
+    )
+    if not all_editions_df.empty
+    else []
+)
+edition_options = ([active_edition] if active_edition else [])
+edition_options += [value for value in known_editions if value not in edition_options]
+edition_options.append("All Editions")
+edition_index = (
+    edition_options.index(active_edition)
+    if active_edition in edition_options
+    else edition_options.index("All Editions")
+)
+selected_edition = st.sidebar.selectbox(
+    "Game Edition", edition_options, index=edition_index
+)
+if selected_edition == "All Editions":
+    full_df = all_editions_df.copy()
+else:
+    full_df = all_editions_df[
+        all_editions_df["Game Edition"].astype(str) == selected_edition
+    ].copy()
+
+season_source = full_df[["Game Edition", "Season"]].copy()
+season_source["Season"] = pd.to_numeric(season_source["Season"], errors="coerce")
+season_source = season_source[season_source["Season"].notna() & (season_source["Season"] > 0)]
+season_source["Season"] = season_source["Season"].astype(int)
+season_pairs = list(
+    season_source.drop_duplicates().itertuples(index=False, name=None)
+)
+if selected_edition == "All Editions":
+    season_pairs.sort(
+        key=lambda pair: (
+            0 if pair[0] == active_edition else 1,
+            str(pair[0]),
+            -int(pair[1]),
+        )
+    )
+    _season_labels = [
+        f"{edition} · {_season_label(season)}"
+        for edition, season in season_pairs
+    ]
+else:
+    season_pairs.sort(key=lambda pair: -int(pair[1]))
+    _season_labels = [_season_label(season) for _, season in season_pairs]
+seasons = sorted({int(season) for _, season in season_pairs}, reverse=True)
+if not season_pairs:
+    st.sidebar.warning(
+        f"No game rows are available for {selected_edition}. Select another edition."
+    )
+    _closed_season_desk(
+        "No seasons with valid game data were found for this edition. "
+        "GM and registration tools remain open."
+    )
+    st.stop()
+
 _qcl_seasons = sorted([s for s in seasons if s < 100], reverse=True)
 _spam_seasons = sorted([s for s in seasons if s >= 100], reverse=True)
 _ordered_seasons = _qcl_seasons + _spam_seasons
-_season_labels = [_season_label(s) for s in _ordered_seasons]
 _active_season = str(_cfg("QCL_ACTIVE_SEASON", "")).strip()
+if not _active_season and (
+    selected_edition == active_edition or selected_edition == "All Editions"
+):
+    _active_season = str(_loaded.get("active_season") or "").strip()
 if _active_season:
     try:
         _active_number = int(_active_season)
@@ -5029,7 +5226,11 @@ if st.session_state.watchlist:
 if scope_choice == "Career (All-Time)":
     df_active = full_df.copy()
     selected_scope = "Career Stats"
-    target_season = _qcl_seasons[0] if _qcl_seasons else _ordered_seasons[0]
+    target_season = (
+        int(_loaded.get("active_season"))
+        if _loaded.get("active_season") in _ordered_seasons
+        else _ordered_seasons[0]
+    )
     banner_text = "CAREER — ALL-TIME"
 elif scope_choice == "Career (QCL)":
     df_active = full_df[full_df['Era'] == 'QCL'].copy()
@@ -5042,10 +5243,16 @@ elif scope_choice == "Career (SPAM)":
     target_season = _spam_seasons[0] if _spam_seasons else _ordered_seasons[0]
     banner_text = "CAREER — SPAM"
 else:
-    target_season = _ordered_seasons[_season_labels.index(scope_choice)]
+    target_edition, target_season = season_pairs[_season_labels.index(scope_choice)]
+    if selected_edition == "All Editions":
+        full_df = all_editions_df[
+            all_editions_df["Game Edition"].astype(str) == str(target_edition)
+        ].copy()
     df_active = full_df[full_df['Season'] == target_season].copy()
     selected_scope = "Season"   # sentinel: anything != "Career Stats"
     banner_text = scope_choice
+
+player_clubs = build_clubs(full_df)
 
 
 if game_type != "All Games":
