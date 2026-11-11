@@ -1,0 +1,28 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Local credentials and secret configuration
+.env
+.env.*
+!.env.example
+!.env.template
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# Tool caches and local output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+*.tmp
+*.bak
+*.last_good.py
+
+# OS metadata
+.DS_Store
+Thumbs.db
