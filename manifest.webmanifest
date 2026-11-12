@@ -1,0 +1,26 @@
+{
+  "id": "./",
+  "name": "QCL League Central",
+  "short_name": "QCL",
+  "description": "QCL league updates and a quick path to League Central.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#10171d",
+  "theme_color": "#10171d",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "./icons/qcl-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/qcl-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
