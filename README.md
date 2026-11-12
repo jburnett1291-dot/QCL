@@ -61,6 +61,10 @@ python -m unittest -v test_qcl_navigation.py
 
 The unit test file uses Python's standard library. These checks validate Python syntax and the current navigation/session contracts; they do not start the Streamlit server, connect to Discord or Sheets, or deploy the app. GitHub Actions runs the same checks on pushes to `main` and pull requests.
 
+## Mobile PWA
+
+See [PWA.md](PWA.md) for the installable mobile companion, offline behavior, and publishing steps.
+
 ## Data and credentials
 
 Tracked CSV/JSON files and image folders may be used by the app or bot; they are intentionally not ignored wholesale. Before changing them, identify the reader/writer and preserve a recoverable copy. Keep `.env`, `.streamlit/secrets.toml`, credentials, and local runtime files out of commits.
