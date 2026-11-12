@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#10171d">
+    <meta name="description" content="QCL league news and a fast mobile path to League Central.">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="QCL">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./icons/qcl-mark.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" sizes="180x180" href="./icons/qcl-icon-180.png">
+    <link rel="stylesheet" href="./pwa.css">
+    <title>QCL Mobile</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="./" aria-label="QCL Mobile home">
+          <img src="./icons/qcl-mark.svg" alt="" width="42" height="42">
+          <span class="brand-copy">
+            <strong>QCL</strong>
+            <span>LEAGUE CENTRAL</span>
+          </span>
+        </a>
+        <div id="connection-status" class="connection-status" role="status" aria-live="polite">
+          <span class="status-dot"></span>
+          <span>Checking connection</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="hero-glow" aria-hidden="true"></div>
+          <p class="eyebrow">THE LEAGUE, IN YOUR POCKET</p>
+          <h1 id="hero-title">QCL, wherever you play.</h1>
+          <p class="hero-copy">Catch league updates, then jump into the full QCL hub when you need the deeper stats and tools.</p>
+          <div class="hero-actions">
+            <a id="open-hub" class="button button-primary" aria-disabled="true">Open the QCL hub</a>
+            <button id="install-app" class="button button-secondary" type="button" hidden>Install QCL</button>
+          </div>
+          <p id="hub-config-note" class="config-note">The QCL hub link will appear here once its live site address is configured.</p>
+        </section>
+
+        <section id="news" class="news-section" aria-labelledby="news-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">WHAT'S HAPPENING</p>
+              <h2 id="news-title">Latest updates</h2>
+            </div>
+            <span id="news-updated" class="updated-label"></span>
+          </div>
+          <div id="news-list" class="news-list" aria-live="polite">
+            <article class="news-card news-placeholder">
+              <span class="news-accent" aria-hidden="true"></span>
+              <div>
+                <p class="news-date">QCL NEWS</p>
+                <h3>Loading the latest updates…</h3>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="install-section" aria-labelledby="install-title">
+          <div class="install-icon" aria-hidden="true">＋</div>
+          <div>
+            <p class="eyebrow">QUICK ACCESS</p>
+            <h2 id="install-title">Add QCL to your home screen</h2>
+            <p class="install-copy">Install this lightweight version for a full-screen launch and a news page that still opens when your connection drops.</p>
+            <details id="install-help">
+              <summary>How to install</summary>
+              <p id="install-help-copy">Use your browser's menu and choose “Install app” or “Add to Home Screen.”</p>
+            </details>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>QCL · League Central</span>
+        <span>Offline mode keeps the app shell and recent news available.</span>
+      </footer>
+    </div>
+
+    <script src="./qcl-pwa-config.js"></script>
+    <script src="./pwa.js"></script>
+  </body>
+</html>
